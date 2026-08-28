@@ -531,10 +531,29 @@ def replace_datagrid_accounts(account_numbers):
 
 
 def load_datagrid_set() -> set:
+    """Reads raw values instead of get_all_records() on purpose:
+    get_all_records() hard-fails (GSpreadException) if the DataGrid
+    sheet's header row ever ends up with a blank or duplicate cell
+    (e.g. from a manual edit, a partial write, or leftover columns
+    from when the worksheet was created with cols=len(headers)+2).
+    Reading raw values and locating 'account_number' by position is
+    immune to that and degrades gracefully even with no header row."""
     ws = _get_or_create_ws(DATAGRID_SHEET, tuple(DATAGRID_HEADERS))
-    records = ws.get_all_records()
-    return {str(r["account_number"]) for r in records if r.get("account_number")}
-
+    all_values = ws.get_all_values()
+    if not all_values:
+        return set()
+    header = [h.strip() for h in all_values[0]]
+    try:
+        acct_idx = header.index("account_number")
+    except ValueError:
+        acct_idx = 0  # header row missing/garbled — fall back to column A
+    accounts = set()
+    for row in all_values[1:]:
+        if len(row) > acct_idx:
+            val = str(row[acct_idx]).strip()
+            if val:
+                accounts.add(val)
+    return accounts
 
 def mark_exported(ids):
     """Finds the given submission ids in the Submissions tab and sets
