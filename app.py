@@ -102,6 +102,32 @@ ASSUMPTIONS MADE (flag to Urban, adjust if wrong)
   not the entire all-time submission history. Exported rows are marked
   exported=1 after download, same pattern as Endo, so they won't be
   re-included/re-bumped in a future export.
+
+====================================================================
+CHANGELOG — 2026-09-01
+====================================================================
+Added by : Claude, per Urban's follow-up request.
+
+FIX: Endo duplicate detection (DataGrid vs Submissions) was comparing
+account numbers as plain-digit strings without a consistent width, so
+a typed account like "1388066081882" would NOT match a DataGrid export
+of the same account as "001-388-06608188-2" (leading zeros), and any
+account read from Excel as a float (e.g. "1388066081882.0") would pick
+up a stray trailing digit after stripping non-digits. Fixed by:
+  - normalize_account() now unwraps whole-number floats before
+    stripping non-digits, so "1388066081882.0" -> "1388066081882"
+    instead of "13880660818820".
+  - New dedupe_key() zero-pads normalize_account() to 15 digits. Both
+    load_datagrid_set() and the admin_dashboard() duplicate check now
+    compare using this padded key, so leading-zero differences between
+    agent-typed input and DataGrid/CAMS exports no longer cause false
+    "NEW" results for accounts that are actually already in the system.
+
+ADDED: clear_endo_data() + a matching "danger zone" expander at the
+top of admin_dashboard(), mirroring the existing AutoStat clear-data
+control, so test Submissions/DataGrid rows can be wiped from inside
+the app (two-step confirm, same as AutoStat) instead of editing the
+Google Sheet by hand.
 ====================================================================
 """
 
@@ -463,10 +489,38 @@ def init_db():
 
 def normalize_account(raw) -> str:
     """Strip everything except digits, so '001-388-06608188-2' and
-    '1388066081882' compare as equal."""
+    '1388066081882' compare as equal.
+
+    2026-09-01 fix: unwrap whole-number floats first. pandas/openpyxl
+    sometimes reads an account-number column as float64 (e.g. when the
+    column has mixed numeric/text formatting in Excel), which turns
+    1388066081882 into 1388066081882.0. Without this guard, the regex
+    strip would keep that trailing '.0' as digits '0', producing a
+    string with one extra trailing zero that never matches the same
+    account typed or read elsewhere as a clean integer/string.
+    """
     if raw is None:
         return ""
+    if isinstance(raw, float):
+        if math.isnan(raw) or math.isinf(raw):
+            return ""
+        if raw.is_integer():
+            raw = int(raw)
     return re.sub(r"\D", "", str(raw))
+
+
+def dedupe_key(raw) -> str:
+    """Zero-padded 15-digit key used ONLY for duplicate comparisons
+    (Endo Submissions vs DataGrid). Account numbers are typed by agents
+    (often without leading zeros) and also come from Excel/CAMS exports
+    (usually WITH leading zeros, e.g. '001-388-...'). normalize_account()
+    alone leaves those as different-length digit strings that would
+    never match, silently letting real duplicates through as "NEW".
+    Padding both sides to the same width before comparing fixes that.
+    This key is for comparison only — never stored or displayed instead
+    of the real account number.
+    """
+    return normalize_account(raw).zfill(15)
 
 
 def format_account_number(raw) -> str:
@@ -537,7 +591,11 @@ def load_datagrid_set() -> set:
     (e.g. from a manual edit, a partial write, or leftover columns
     from when the worksheet was created with cols=len(headers)+2).
     Reading raw values and locating 'account_number' by position is
-    immune to that and degrades gracefully even with no header row."""
+    immune to that and degrades gracefully even with no header row.
+
+    2026-09-01 fix: return dedupe_key()-padded values, not raw digit
+    strings, so this set can be safely compared against padded keys
+    from Submissions regardless of leading zeros."""
     ws = _get_or_create_ws(DATAGRID_SHEET, tuple(DATAGRID_HEADERS))
     all_values = ws.get_all_values()
     if not all_values:
@@ -552,7 +610,7 @@ def load_datagrid_set() -> set:
         if len(row) > acct_idx:
             val = str(row[acct_idx]).strip()
             if val:
-                accounts.add(val)
+                accounts.add(dedupe_key(val))
     return accounts
 
 def mark_exported(ids):
@@ -588,6 +646,20 @@ def mark_exported(ids):
             )
     if updates:
         ws.batch_update(updates, value_input_option="RAW")
+
+
+def clear_endo_data():
+    """NEW (2026-09-01): wipes all data rows from Submissions and
+    DataGrid (keeps headers). Mirrors clear_autostat_submissions()
+    below so Endo test data can be reset from inside the app instead
+    of editing the Google Sheet by hand."""
+    ws_sub = _get_or_create_ws(SUBMISSIONS_SHEET, tuple(SUBMISSIONS_HEADERS))
+    ws_sub.clear()
+    ws_sub.append_row(SUBMISSIONS_HEADERS)
+
+    ws_dg = _get_or_create_ws(DATAGRID_SHEET, tuple(DATAGRID_HEADERS))
+    ws_dg.clear()
+    ws_dg.append_row(DATAGRID_HEADERS)
 
 
 # ----------------------------------------------------------------------
@@ -1777,7 +1849,7 @@ def admin_login():
 
 
 # ----------------------------------------------------------------------
-# UI — ADMIN DASHBOARD (Endo) — UNCHANGED FROM ORIGINAL
+# UI — ADMIN DASHBOARD (Endo)
 # ----------------------------------------------------------------------
 
 def admin_dashboard():
@@ -1799,6 +1871,22 @@ def admin_dashboard():
             st.session_state["is_admin"] = False
             st.session_state["admin_process"] = None
             st.rerun()
+
+    st.divider()
+
+    # --- NEW (2026-09-01): Danger zone — clear all Endo data for testing ---
+    with st.expander("🗑️ Clear all Endo data (test data reset)", expanded=False):
+        st.warning("This will **permanently delete** all rows in Submissions and DataGrid. Use only to clear test data.")
+        if "confirm_clear_endo" not in st.session_state:
+            st.session_state["confirm_clear_endo"] = False
+        if st.button("I understand — Clear Endo Database", key="clear_endo_btn"):
+            st.session_state["confirm_clear_endo"] = True
+        if st.session_state.get("confirm_clear_endo"):
+            if st.button("✅ YES, delete everything", key="clear_endo_confirm"):
+                clear_endo_data()
+                st.session_state["confirm_clear_endo"] = False
+                st.success("Endo database cleared (Submissions + DataGrid). You may now re-test.")
+                st.rerun()
 
     st.divider()
 
@@ -1840,8 +1928,11 @@ def admin_dashboard():
         st.info("No submissions yet.")
         return
 
+    # FIXED (2026-09-01): compare using dedupe_key() (zero-padded 15-digit)
+    # on both sides so leading-zero differences between agent-typed input
+    # and DataGrid/CAMS exports don't cause real duplicates to show as NEW.
     df["status"] = df["account_number"].apply(
-        lambda a: "DUPLICATE — already in system" if a in datagrid_set else "NEW — ready to scrape"
+        lambda a: "DUPLICATE — already in system" if dedupe_key(a) in datagrid_set else "NEW — ready to scrape"
     )
 
     col1, col2, col3 = st.columns(3)
