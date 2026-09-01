@@ -1898,6 +1898,7 @@ def admin_dashboard():
     if to_export.empty:
         st.info("Nothing new to export with the current filters.")
     else:
+        st.write(f"DEBUG: to_export has {len(to_export)} rows, placements: {to_export['placement'].value_counts().to_dict()}")
         workbook_bytes = build_export_workbook(to_export)
         clicked = st.download_button(
             label=f"⬇ Download {len(to_export)} new account(s) as Excel",
