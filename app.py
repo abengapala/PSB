@@ -1568,11 +1568,56 @@ def render_rankings_body():
     pivot.insert(0, "RANK", range(1, len(pivot) + 1))
 
     st.caption(f"**{period}** — {len(scoped)} status update(s) across {pivot['AGENT'].nunique()} agent(s).")
-    st.dataframe(pivot, use_container_width=True, hide_index=True)
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("Total PTP", int(pivot["PTP"].sum()))
-    m2.metric("Total REPO", int(pivot["REPO"].sum()))
+    m1.metric("🤝 Total PTP", int(pivot["PTP"].sum()))
+    m2.metric("🚗 Total REPO", int(pivot["REPO"].sum()))
+    m3.metric("💳 Total KEPT", int(pivot["KEPT"].sum()))
+
+    st.write("")
+
+    # --- Podium: top 3 as big, obvious cards --------------------------
+    top3 = pivot.head(3)
+    if len(top3) > 0:
+        podium_cols = st.columns(len(top3))
+        medal = ["🥇", "🥈", "🥉"]
+        trim = ["gold", "silver", "bronze"]
+        for i, (_, row) in enumerate(top3.iterrows()):
+            with podium_cols[i]:
+                st.markdown(
+                    f"""
+                    <div class="rank-podium-card rank-{trim[i]}">
+                        <div class="rank-medal">{medal[i]}</div>
+                        <div class="rank-name">{row['AGENT']}</div>
+                        <div class="rank-total">{int(row['TOTAL'])}</div>
+                        <div class="rank-total-label">updates</div>
+                        <div class="rank-breakdown">
+                            PTP {int(row['PTP'])} · REPO {int(row['REPO'])} · KEPT {int(row['KEPT'])}
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+        st.write("")
+
+    # --- Full leaderboard table ----------------------------------------
+    max_total = int(pivot["TOTAL"].max()) if not pivot.empty else 1
+    st.dataframe(
+        pivot,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "RANK": st.column_config.NumberColumn("#", width="small"),
+            "AGENT": st.column_config.TextColumn("AGENT", width="medium"),
+            "PTP": st.column_config.NumberColumn("PTP", width="small"),
+            "REPO": st.column_config.NumberColumn("REPO", width="small"),
+            "KEPT": st.column_config.NumberColumn("KEPT", width="small"),
+            "OTHER": st.column_config.NumberColumn("OTHER", width="small"),
+            "TOTAL": st.column_config.ProgressColumn(
+                "TOTAL", min_value=0, max_value=max_total, format="%d"
+            ),
+        },
+    )
     m3.metric("Total KEPT", int(pivot["KEPT"].sum()))
 
 
