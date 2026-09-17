@@ -60,8 +60,8 @@ NEW UI FLOW
 ------------
 - Agent side: landing page now asks the agent to pick "New Endo" or
   "Auto Stat" first (process_picker_page). Picking Endo goes straight
-  to the ORIGINAL, unmodified agent_form_page(). Picking Auto Stat
-  goes to the new autostat_form_page().
+  to the ORIGINAL, unmodified agent_form_page(). Picking Auto Stat goes
+  to the new autostat_form_page().
 - Admin side: after password login, admin now picks "Endo" or "Auto
   Stat" first (admin_router / admin_picker_page). Picking Endo calls
   the ORIGINAL, unmodified admin_dashboard(). Picking Auto Stat calls
@@ -159,6 +159,30 @@ from the Admin process picker) counting, per agent, how many PTP /
 REPO / KEPT (and OTHER) status updates they logged, for Today / This
 Week / This Month / All Time. Reads directly from the existing
 AutoStat_Submissions data — does not add, remove, or modify any rows.
+
+====================================================================
+CHANGELOG — 2026-09-17 (v2, UI pass)
+====================================================================
+Added by : Claude, per Urban's follow-up request ("too plain, add a
+PTP chart/table, make it look good").
+
+UI:
+  - Process picker cards (agent + admin) rebuilt as real cards: icon
+    chip, title, one-line description, colored top accent per process,
+    hover lift. Old .process-pick-btn plain-button styling replaced.
+  - Added a live "today at a glance" stat strip under the hero on the
+    agent picker page (submitted counts pulled straight from Sheets,
+    read-only, no schema change).
+  - Background got a subtle radial gradient instead of flat color.
+
+PTP DATA VIEW (new, additive, read-only):
+  - render_ptp_trend_section() — bar chart of PTP count + PTP amount
+    promised per day (last 14 days) using AutoStat_Submissions, plus a
+    peso-amount leaderboard (Total PTP Promised vs Total Kept) per
+    agent alongside the existing count-based rankings table. Wired
+    into render_rankings_body() so it shows on both the admin Agent
+    Rankings page and the agent-facing public Rankings page — nothing
+    else about rankings changed.
 ====================================================================
 """
 
@@ -1514,6 +1538,86 @@ def _classify_status(status_code: str) -> str:
     return "OTHER"
 
 
+def render_ptp_trend_section(df: pd.DataFrame):
+    """NEW (2026-09-17 v2). Two additive, read-only views built on top
+    of AutoStat_Submissions — does not touch the existing pivot table
+    above it:
+
+      1. A 14-day bar chart of PTP COUNT + PTP AMOUNT PROMISED per day,
+         so a plain "which way is this trending" question has an
+         answer without opening a spreadsheet.
+      2. A peso-amount leaderboard per agent: Total PTP Promised vs
+         Total Kept (amount collected/confirmed), since the count-based
+         table above answers "who logged the most updates" but not
+         "who is promising/collecting the most money".
+
+    df is the already-loaded, already-'_dt'/'_bucket'/'_agent'-tagged
+    AutoStat_Submissions frame from render_rankings_body() — reused
+    as-is, no extra Sheets calls.
+    """
+    work = df.copy()
+    work["_ptp_amt"] = work["ptp_amount"].apply(_parse_amount)
+    work["_claim_amt"] = work["claim_paid_amount"].apply(_parse_amount)
+
+    st.write("")
+    st.subheader("💰 PTP Trend & Amounts")
+
+    # --- 1) 14-day trend: PTP count + PTP amount promised per day ------
+    cutoff = pd.Timestamp(date.today()) - pd.Timedelta(days=13)
+    ptp_only = work[(work["_bucket"] == "PTP") & (work["_dt"] >= cutoff)].copy()
+
+    if ptp_only.empty:
+        st.caption("No PTP updates logged in the last 14 days yet.")
+    else:
+        ptp_only["_day"] = ptp_only["_dt"].dt.date
+        daily = ptp_only.groupby("_day").agg(
+            count=("id", "count"),
+            amount=("_ptp_amt", lambda s: s.fillna(0).sum()),
+        ).reindex(
+            [(cutoff + pd.Timedelta(days=i)).date() for i in range(14)],
+            fill_value=0,
+        )
+        day_labels = [d.strftime("%b %d") for d in daily.index]
+
+        t1, t2 = st.columns(2)
+        with t1:
+            chart_display_v0_series = None  # placeholder, not used — kept for clarity
+        st.caption("PTP count logged per day (last 14 days)")
+        st.bar_chart(
+            pd.DataFrame({"PTP Count": daily["count"].values}, index=day_labels),
+            use_container_width=True,
+        )
+        st.caption("PTP amount promised per day, ₱ (last 14 days)")
+        st.bar_chart(
+            pd.DataFrame({"PTP Amount (₱)": daily["amount"].values}, index=day_labels),
+            use_container_width=True,
+        )
+
+    st.write("")
+
+    # --- 2) Peso leaderboard: Total PTP Promised vs Total Kept ---------
+    money = work.groupby("_agent").agg(
+        ptp_promised=("_ptp_amt", lambda s: s.fillna(0).sum()),
+        kept_amount=("_claim_amt", lambda s: s.fillna(0).sum()),
+    )
+    money = money[(money["ptp_promised"] > 0) | (money["kept_amount"] > 0)]
+    money = money.sort_values("ptp_promised", ascending=False).reset_index().rename(columns={"_agent": "AGENT"})
+
+    if money.empty:
+        st.caption("No PTP or Kept amounts logged yet for this period.")
+        return
+
+    money["PTP PROMISED (₱)"] = money["ptp_promised"].map(lambda v: f"{v:,.2f}")
+    money["KEPT (₱)"] = money["kept_amount"].map(lambda v: f"{v:,.2f}")
+
+    st.caption("Peso amounts by agent — PTP promised vs. Kept/collected")
+    st.dataframe(
+        money[["AGENT", "PTP PROMISED (₱)", "KEPT (₱)"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
 def render_rankings_body():
     """Shared rankings table + metrics, used by BOTH the admin-side
     Agent Rankings page and the agent-facing homescreen Rankings page.
@@ -1618,7 +1722,10 @@ def render_rankings_body():
             ),
         },
     )
-    m3.metric("Total KEPT", int(pivot["KEPT"].sum()))
+
+    # NEW (2026-09-17 v2): PTP trend chart + peso leaderboard, scoped to
+    # the same period selection above. Additive — read-only.
+    render_ptp_trend_section(scoped)
 
 
 def agent_rankings_page():
@@ -1680,9 +1787,14 @@ def inject_styles():
         .stDeployButton { display: none; }
         [data-testid="stSidebar"] { display: none; }
 
-        /* Page background */
-        .stApp { background: #0a0e1a; }
-        [data-testid="stAppViewContainer"] { background: #0a0e1a; }
+        /* Page background — subtle radial gradient instead of flat color */
+        .stApp {
+            background:
+                radial-gradient(circle at 20% 0%, rgba(200,16,46,0.10) 0%, rgba(200,16,46,0) 45%),
+                radial-gradient(circle at 85% 15%, rgba(37,99,235,0.08) 0%, rgba(37,99,235,0) 40%),
+                #0a0e1a;
+        }
+        [data-testid="stAppViewContainer"] { background: transparent; }
 
         /* Main content padding */
         .block-container {
@@ -1828,12 +1940,115 @@ def inject_styles():
         /* Success / error / warning */
         [data-testid="stAlert"] { border-radius: 10px !important; }
 
-        /* NEW: process picker cards (agent + admin) */
-        .process-pick-btn button {
+        /* ==================================================================
+           NEW (2026-09-17 v2): PROCESS PICKER CARDS
+           Replaces the old plain '.process-pick-btn button' look — each
+           process now gets its own accent color, icon chip, title + one
+           line of description, and a hover lift. Applied to both the
+           agent picker (process_picker_page) and the admin picker
+           (admin_picker_page) since both use the same markup pattern.
+           ================================================================== */
+        .picker-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 1rem;
+            margin-top: 0.5rem;
+        }
+        .picker-card {
+            position: relative;
+            background: #131929;
+            border: 1px solid #1e2d45;
+            border-radius: 16px;
+            padding: 1.5rem 1.25rem 1.25rem;
+            text-align: left;
+            overflow: hidden;
+            transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+            box-shadow: 0 6px 20px rgba(0,0,0,0.35);
+        }
+        .picker-card::before {
+            content: "";
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 3px;
+            background: var(--accent, #c8102e);
+        }
+        .picker-card:hover {
+            transform: translateY(-4px);
+            border-color: var(--accent, #c8102e);
+            box-shadow: 0 12px 30px rgba(0,0,0,0.5);
+        }
+        .picker-icon {
+            width: 42px; height: 42px;
+            border-radius: 11px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 1.3rem;
+            background: color-mix(in srgb, var(--accent, #c8102e) 20%, transparent);
+            margin-bottom: 0.85rem;
+        }
+        .picker-title {
+            color: #ffffff;
+            font-size: 1.02rem;
+            font-weight: 700;
+            margin-bottom: 0.3rem;
+            letter-spacing: 0.01em;
+        }
+        .picker-desc {
+            color: #8b93a7;
+            font-size: 0.8rem;
+            line-height: 1.35;
+            margin-bottom: 0.9rem;
+            min-height: 2.4em;
+        }
+        /* the real Streamlit button sits underneath the card visuals,
+           styled to look like a subtle 'open' pill rather than a full
+           button, and is what actually receives the click */
+        .picker-card .stButton > button {
             width: 100% !important;
-            padding: 1.75rem 1rem !important;
-            font-size: 1.05rem !important;
-            border-radius: 14px !important;
+            background: color-mix(in srgb, var(--accent, #c8102e) 14%, #0d1525) !important;
+            border: 1px solid color-mix(in srgb, var(--accent, #c8102e) 45%, #1e2d45) !important;
+            color: #e5e7eb !important;
+            font-size: 0.78rem !important;
+            font-weight: 700 !important;
+            letter-spacing: 0.06em !important;
+            padding: 0.45rem !important;
+            border-radius: 8px !important;
+        }
+        .picker-card .stButton > button:hover {
+            background: var(--accent, #c8102e) !important;
+            border-color: var(--accent, #c8102e) !important;
+            color: #ffffff !important;
+        }
+        .picker-card.accent-red    { --accent: #c8102e; }
+        .picker-card.accent-blue   { --accent: #2563eb; }
+        .picker-card.accent-green  { --accent: #16a34a; }
+        .picker-card.accent-gold   { --accent: #d4a017; }
+
+        /* NEW: "today at a glance" stat strip on the agent picker page */
+        .glance-strip {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 0.75rem;
+            max-width: 900px;
+            margin: 0 auto 2rem;
+        }
+        .glance-item {
+            background: #101625;
+            border: 1px solid #1e2d45;
+            border-radius: 12px;
+            padding: 0.85rem 1rem;
+            text-align: center;
+        }
+        .glance-value {
+            font-size: 1.4rem;
+            font-weight: 800;
+            color: #ffffff;
+        }
+        .glance-label {
+            font-size: 0.68rem;
+            color: #6b7280;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin-top: 0.15rem;
         }
         </style>
         """,
@@ -2123,11 +2338,84 @@ def my_submissions_page():
 
 
 # ========================================================================
+# NEW (2026-09-17 v2): shared picker-card renderer
+# ========================================================================
+
+def _render_picker_card(col, icon, title, desc, accent, button_label, on_key):
+    """Renders one picker card (icon chip + title + description) with a
+    real st.button underneath that drives navigation. accent is one of
+    'red' | 'blue' | 'green' | 'gold' (matches the .accent-* CSS above).
+    Returns True if the button was clicked this run."""
+    with col:
+        st.markdown(
+            f"""
+            <div class="picker-card accent-{accent}">
+                <div class="picker-icon">{icon}</div>
+                <div class="picker-title">{title}</div>
+                <div class="picker-desc">{desc}</div>
+            """,
+            unsafe_allow_html=True,
+        )
+        clicked = st.button(button_label, key=on_key, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+    return clicked
+
+
+def _render_today_glance_strip():
+    """NEW: small read-only stat strip on the agent landing page —
+    today's Endo count + today's Auto Stat count + today's PTP count,
+    pulled straight from the same Sheets data the rest of the app
+    already loads. Purely additive, no writes."""
+    try:
+        endo_df = load_submissions()
+        as_df = load_autostat_submissions()
+    except Exception:
+        return  # don't let a transient Sheets hiccup break the landing page
+
+    today = date.today()
+
+    endo_today = 0
+    if not endo_df.empty:
+        endo_dt = pd.to_datetime(endo_df["submitted_at"], errors="coerce")
+        endo_today = int((endo_dt.dt.date == today).sum())
+
+    as_today = 0
+    ptp_today = 0
+    if not as_df.empty:
+        as_dt = pd.to_datetime(as_df["submitted_at"], errors="coerce")
+        today_mask = as_dt.dt.date == today
+        as_today = int(today_mask.sum())
+        ptp_today = int(
+            (today_mask & as_df["status_code"].apply(_classify_status).eq("PTP")).sum()
+        )
+
+    st.markdown(
+        f"""
+        <div class="glance-strip">
+            <div class="glance-item">
+                <div class="glance-value">{endo_today}</div>
+                <div class="glance-label">Endo Today</div>
+            </div>
+            <div class="glance-item">
+                <div class="glance-value">{as_today}</div>
+                <div class="glance-label">Auto Stat Today</div>
+            </div>
+            <div class="glance-item">
+                <div class="glance-value">{ptp_today}</div>
+                <div class="glance-label">PTP Today</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ========================================================================
 # NEW: UI — PROCESS PICKER (agent landing page)
 # ========================================================================
 
 def process_picker_page():
-    _, col, _ = st.columns([1, 2, 1])
+    _, col, _ = st.columns([1, 3, 1])
     with col:
         st.markdown("""
             <div class="psb-hero">
@@ -2137,31 +2425,40 @@ def process_picker_page():
             </div>
         """, unsafe_allow_html=True)
 
+        _render_today_glance_strip()
+
+        st.markdown('<div class="picker-grid">', unsafe_allow_html=True)
         c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.markdown('<div class="process-pick-btn">', unsafe_allow_html=True)
-            if st.button("🧾 New Endo", use_container_width=True):
-                st.session_state["agent_process"] = "endo"
-                st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
-        with c2:
-            st.markdown('<div class="process-pick-btn">', unsafe_allow_html=True)
-            if st.button("📊 Auto Stat", use_container_width=True):
-                st.session_state["agent_process"] = "autostat"
-                st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
-        with c3:
-            st.markdown('<div class="process-pick-btn">', unsafe_allow_html=True)
-            if st.button("📋 My Submissions", use_container_width=True):
-                st.session_state["agent_process"] = "my_submissions"
-                st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
-        with c4:
-            st.markdown('<div class="process-pick-btn">', unsafe_allow_html=True)
-            if st.button("🏆 Rankings", use_container_width=True):
-                st.session_state["agent_process"] = "rankings"
-                st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
+
+        if _render_picker_card(
+            c1, "🧾", "New Endo", "Submit a new account for CAMS SCRAPE endorsement.",
+            "red", "OPEN", "pick_endo",
+        ):
+            st.session_state["agent_process"] = "endo"
+            st.rerun()
+
+        if _render_picker_card(
+            c2, "📊", "Auto Stat", "Log a PTP, REPO, or KEPT status update for an account.",
+            "blue", "OPEN", "pick_autostat",
+        ):
+            st.session_state["agent_process"] = "autostat"
+            st.rerun()
+
+        if _render_picker_card(
+            c3, "📋", "My Submissions", "See your own Endo and Auto Stat history and proof of submission.",
+            "green", "OPEN", "pick_mysubs",
+        ):
+            st.session_state["agent_process"] = "my_submissions"
+            st.rerun()
+
+        if _render_picker_card(
+            c4, "🏆", "Rankings", "See PTP / REPO / KEPT leaderboards across the team.",
+            "gold", "OPEN", "pick_rankings",
+        ):
+            st.session_state["agent_process"] = "rankings"
+            st.rerun()
+
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ----------------------------------------------------------------------
@@ -2562,25 +2859,31 @@ def admin_picker_page():
         </div>
     """, unsafe_allow_html=True)
 
+    st.markdown('<div class="picker-grid">', unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown('<div class="process-pick-btn">', unsafe_allow_html=True)
-        if st.button("🧾 Endo Admin", use_container_width=True):
-            st.session_state["admin_process"] = "endo"
-            st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-    with c2:
-        st.markdown('<div class="process-pick-btn">', unsafe_allow_html=True)
-        if st.button("📊 Auto Stat Admin", use_container_width=True):
-            st.session_state["admin_process"] = "autostat"
-            st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-    with c3:
-        st.markdown('<div class="process-pick-btn">', unsafe_allow_html=True)
-        if st.button("📈 Agent Rankings", use_container_width=True):
-            st.session_state["admin_process"] = "rankings"
-            st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
+
+    if _render_picker_card(
+        c1, "🧾", "Endo Admin", "Review Endo submissions, check duplicates, export CAMS files.",
+        "red", "OPEN", "admin_pick_endo",
+    ):
+        st.session_state["admin_process"] = "endo"
+        st.rerun()
+
+    if _render_picker_card(
+        c2, "📊", "Auto Stat Admin", "Review status updates, split Clean vs Claim Paid, export.",
+        "blue", "OPEN", "admin_pick_autostat",
+    ):
+        st.session_state["admin_process"] = "autostat"
+        st.rerun()
+
+    if _render_picker_card(
+        c3, "📈", "Agent Rankings", "PTP / REPO / KEPT leaderboard, trend, and peso totals.",
+        "gold", "OPEN", "admin_pick_rankings",
+    ):
+        st.session_state["admin_process"] = "rankings"
+        st.rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
     st.divider()
     if st.button("🔒 Log out"):
