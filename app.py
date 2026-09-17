@@ -128,13 +128,44 @@ top of admin_dashboard(), mirroring the existing AutoStat clear-data
 control, so test Submissions/DataGrid rows can be wiped from inside
 the app (two-step confirm, same as AutoStat) instead of editing the
 Google Sheet by hand.
+
+====================================================================
+CHANGELOG — 2026-09-17
+====================================================================
+Added by : Claude, per Urban's follow-up request.
+
+FIX (bug Urban reported): Auto Stat allowed a status update to be
+submitted with a blank/zero PTP AMOUNT even when the status was a PTP
+status. The old validation only checked `has_ptp and not ptp_date` —
+it never checked ptp_amount at all, and PTP AMOUNT is a
+st.number_input with a default of 0.0, which is falsy but was never
+inspected, so a forgotten amount silently saved as 0.00. Fixed by
+adding an explicit `has_ptp and ptp_amount in (None, 0, 0.0)` check
+that blocks the submit button with an on-screen error, same pattern
+as the existing PTP DATE check. The same "required-if-this-status"
+treatment was extended to CLAIM PAID DATE / CLAIM PAID AMOUNT for
+"KEPT" statuses, since those were previously optional too even though
+they're the whole reason those rows get segregated at export time.
+
+ADDED: fixed AGENTS list (AUTO_STAT_AGENTS) + agent picked per entry
+via a required selectbox, replacing the old free-text CMS Username
+field on the Auto Stat form. Per Urban: nothing about existing stored
+data changes — this only affects new submissions going forward, and
+existing rows in the sheet are untouched. Urban should edit
+AUTO_STAT_AGENTS below to the real/complete agent roster.
+
+ADDED: agent_rankings_page() — a new read-only Admin view (reachable
+from the Admin process picker) counting, per agent, how many PTP /
+REPO / KEPT (and OTHER) status updates they logged, for Today / This
+Week / This Month / All Time. Reads directly from the existing
+AutoStat_Submissions data — does not add, remove, or modify any rows.
 ====================================================================
 """
 
 import math
 import re
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from io import BytesIO
 
 import gspread
@@ -147,6 +178,24 @@ from google.oauth2.service_account import Credentials
 # CONFIG — change these to fit your team
 # ----------------------------------------------------------------------
 PLACEMENTS = ["FRONTEND", "MIDRANGE", "HARDCORE"]
+
+# NEW (2026-09-17): fixed agent roster for the paste-friendly agent field
+# on Auto Stat / My Submissions / Rankings. Sourced from Urban's list of
+# agents actively submitting Endo + Auto Stat. Add/remove names here as
+# your team roster changes.
+AUTO_STAT_AGENTS = [
+    "ABORONG",
+    "CJBCRUZ",
+    "CSAYSON",
+    "EBASTASA",
+    "GSANJOAQUIN",
+    "JGALOPE",
+    "JSPENA",
+    "LMOLAYTA",
+    "PSAVEDRA",
+    "RHAMA",
+    "STUPAS",
+]
 
 STATUS_CODES = [
     "CALL - POS_UNATTENDED",
@@ -1444,6 +1493,130 @@ def bulk_paste_autostat_section():
             st.rerun()
 
 
+# ========================================================================
+# NEW (2026-09-17): AGENT RANKINGS — read-only, admin-side
+# ========================================================================
+
+def _classify_status(status_code: str) -> str:
+    """Buckets a status_code into PTP / REPO / KEPT / OTHER for the
+    rankings view. A status can contain both 'PTP' and 'REPO'
+    (e.g. 'CALL - PTP REPO' = a PTP promise specifically to repo the
+    unit) — those are counted as PTP for the ranking (that's the
+    open promise being tracked); 'KEPT' statuses (the promise was
+    already fulfilled) are their own bucket regardless of wording."""
+    sc = (status_code or "").upper()
+    if "KEPT" in sc:
+        return "KEPT"
+    if "PTP" in sc:
+        return "PTP"
+    if "REPO" in sc:
+        return "REPO"
+    return "OTHER"
+
+
+def render_rankings_body():
+    """Shared rankings table + metrics, used by BOTH the admin-side
+    Agent Rankings page and the agent-facing homescreen Rankings page.
+    Read-only — never modifies AutoStat_Submissions."""
+    df = load_autostat_submissions()
+    if df.empty:
+        st.info("No Auto Stat submissions yet — nothing to rank.")
+        return
+
+    df["_dt"] = pd.to_datetime(df["submitted_at"], errors="coerce")
+    df = df[df["_dt"].notna()].copy()
+    df["_bucket"] = df["status_code"].apply(_classify_status)
+    df["_agent"] = df["collector"].astype(str).str.strip().str.upper()
+    df = df[df["_agent"] != ""]
+
+    today = pd.Timestamp(date.today())
+    period = st.radio(
+        "Period", ["Today", "This Week", "This Month", "All Time"],
+        horizontal=True, index=1,
+    )
+    if period == "Today":
+        mask = df["_dt"].dt.date == today.date()
+    elif period == "This Week":
+        start_of_week = today - pd.Timedelta(days=today.weekday())  # Monday
+        mask = df["_dt"] >= start_of_week
+    elif period == "This Month":
+        mask = (df["_dt"].dt.year == today.year) & (df["_dt"].dt.month == today.month)
+    else:
+        mask = pd.Series(True, index=df.index)
+
+    scoped = df[mask]
+
+    if scoped.empty:
+        st.info(f"No Auto Stat submissions for **{period}**.")
+        return
+
+    pivot = pd.pivot_table(
+        scoped,
+        index="_agent",
+        columns="_bucket",
+        values="id",
+        aggfunc="count",
+        fill_value=0,
+    )
+    for col in ["PTP", "REPO", "KEPT", "OTHER"]:
+        if col not in pivot.columns:
+            pivot[col] = 0
+    pivot = pivot[["PTP", "REPO", "KEPT", "OTHER"]]
+    pivot["TOTAL"] = pivot.sum(axis=1)
+    pivot = pivot.sort_values("TOTAL", ascending=False)
+    pivot = pivot.reset_index().rename(columns={"_agent": "AGENT"})
+    pivot.insert(0, "RANK", range(1, len(pivot) + 1))
+
+    st.caption(f"**{period}** — {len(scoped)} status update(s) across {pivot['AGENT'].nunique()} agent(s).")
+    st.dataframe(pivot, use_container_width=True, hide_index=True)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total PTP", int(pivot["PTP"].sum()))
+    m2.metric("Total REPO", int(pivot["REPO"].sum()))
+    m3.metric("Total KEPT", int(pivot["KEPT"].sum()))
+
+
+def agent_rankings_page():
+    st.markdown("""
+        <div class="psb-hero" style="padding-bottom:1rem;">
+            <div class="psb-badge">PSB</div>
+            <div class="psb-title">Agent Rankings</div>
+            <div class="psb-sub">Auto Stat · PTP / REPO / KEPT by Agent</div>
+        </div>
+    """, unsafe_allow_html=True)
+
+    top_a, top_b = st.columns([1, 1])
+    with top_a:
+        if st.button("← Back to Admin picker"):
+            st.session_state["admin_process"] = None
+            st.rerun()
+    with top_b:
+        if st.button("🔒 Log out"):
+            st.session_state["is_admin"] = False
+            st.session_state["logo_clicks"] = 0
+            st.session_state["admin_process"] = None
+            st.rerun()
+
+    st.divider()
+    render_rankings_body()
+
+
+# ========================================================================
+# NEW (2026-09-17, v2): UI — RANKINGS, agent-facing (no admin login needed)
+# ========================================================================
+
+def public_rankings_page():
+    _, col, _ = st.columns([1, 3, 1])
+    with col:
+        st.markdown("""
+            <div class="psb-hero">
+                <div class="psb-badge">PSB</div>
+                <div class="psb-title">RANKINGS</div>
+                <div class="psb-sub">Auto Stat · PTP / REPO / KEPT by Agent</div>
+            </div>
+        """, unsafe_allow_html=True)
+        render_rankings_body()
+
 
 # ----------------------------------------------------------------------
 # UI — STYLES
@@ -1685,6 +1858,19 @@ def autostat_form_page():
             </div>
         """, unsafe_allow_html=True)
 
+        # CHANGED (2026-09-17, v2): agent field is now a text input so
+        # agents can paste their CMS username instead of clicking through
+        # a dropdown. It's still normalized (trimmed + UPPERCASED) and
+        # checked against AUTO_STAT_AGENTS before the submit is allowed,
+        # so My Submissions / Rankings keep matching correctly even if
+        # someone pastes "csayson" one day and "CSAYSON " the next.
+        collector_raw = st.text_input(
+            "AGENT (CMS username — paste it)",
+            placeholder="e.g. CSAYSON",
+            key=f"as_col_{v}",
+        )
+        collector = collector_raw.strip().upper()
+
         account_number = st.text_input(
             "ACCOUNT NUMBER",
             placeholder="e.g. 001-388-06387719-6 or digits only",
@@ -1747,12 +1933,6 @@ def autostat_form_page():
                 key=f"as_rt_{v}",
             )
 
-        collector = st.text_input(
-            "CMS USERNAME",
-            placeholder="CAPSLOCK PLEASE e.g. CSAYSON",
-            key=f"as_col_{v}",
-        )
-
         if st.button("✦ SUBMIT STATUS", use_container_width=True, key=f"as_sub_{v}"):
             errors = []
             clean_account = normalize_account(account_number)
@@ -1760,10 +1940,28 @@ def autostat_form_page():
                 errors.append("Account Number looks invalid — enter at least 10 digits.")
             if not status_code:
                 errors.append("Status Code is required.")
-            if not collector.strip():
-                errors.append("CMS Username is required.")
+            if not collector:
+                errors.append("Agent is required — paste your CMS username.")
+            elif collector not in [a.upper() for a in AUTO_STAT_AGENTS]:
+                errors.append(
+                    f"'{collector_raw.strip()}' isn't a recognized agent. "
+                    f"Check the spelling, or ask admin to add you to the roster."
+                )
+            # CHANGED (2026-09-17): PTP Date AND PTP Amount are both now
+            # required (blocking) whenever the status is a PTP status —
+            # previously only PTP Date was checked, so a blank/zero PTP
+            # Amount silently went through.
             if has_ptp and not ptp_date:
                 errors.append("PTP Date is required for this status.")
+            if has_ptp and (ptp_amount in (None, 0, 0.0)):
+                errors.append("PTP Amount is required for this status (must be greater than 0).")
+            # NEW (2026-09-17): same required-if-this-status treatment for
+            # KEPT statuses — these are the rows that get segregated into
+            # the CLAIM PAID sheet at export, so they need real values.
+            if has_kept and not claim_paid_date:
+                errors.append("Claim Paid Date is required for this status.")
+            if has_kept and (claim_paid_amount in (None, 0, 0.0)):
+                errors.append("Claim Paid Amount is required for this status (must be greater than 0).")
 
             if errors:
                 for e in errors:
@@ -1776,9 +1974,9 @@ def autostat_form_page():
                     status_code,
                     remarks,
                     ptp_date,
-                    ptp_amount if (has_ptp and ptp_amount) else None,
+                    ptp_amount if has_ptp else None,
                     claim_paid_date,
-                    claim_paid_amount if (has_kept and claim_paid_amount) else None,
+                    claim_paid_amount if has_kept else None,
                     collector,
                     remark_dt=remark_dt,
                 )
@@ -1786,6 +1984,97 @@ def autostat_form_page():
                 st.session_state["as_v"] += 1
                 st.rerun()
 
+
+
+# ========================================================================
+# NEW (2026-09-17): UI — MY SUBMISSIONS (agent-facing proof of submission)
+# ========================================================================
+
+def my_submissions_page():
+    """Lets an agent see their OWN Endo + Auto Stat submission history —
+    proof of what they sent and when, without needing admin access.
+    Read-only: pulls straight from the same Submissions / AutoStat_
+    Submissions data the admin dashboards use, filtered to one agent."""
+    _, col, _ = st.columns([1, 3, 1])
+    with col:
+        st.markdown("""
+            <div class="psb-hero">
+                <div class="psb-badge">PSB</div>
+                <div class="psb-title">MY SUBMISSIONS</div>
+                <div class="psb-sub">Auto Loan Curing · Your Submission History</div>
+            </div>
+        """, unsafe_allow_html=True)
+
+        who_raw = st.text_input(
+            "WHO ARE YOU",
+            placeholder="Paste your CMS username to see what you've submitted...",
+            key="my_sub_who",
+        )
+        who = who_raw.strip() if who_raw else None
+
+        if not who:
+            st.info("Paste your name above to see your submitted Endo and Auto Stat entries.")
+            return
+
+        who_upper = who.strip().upper()
+
+        endo_df = load_submissions()
+        my_endo = endo_df[endo_df["agent"].astype(str).str.strip().str.upper() == who_upper]
+
+        as_df = load_autostat_submissions()
+        my_as = as_df[as_df["collector"].astype(str).str.strip().str.upper() == who_upper]
+
+        m1, m2 = st.columns(2)
+        m1.metric("Endo submitted", len(my_endo))
+        m2.metric("Auto Stat submitted", len(my_as))
+
+        st.divider()
+
+        st.subheader("🧾 My New Endo Submissions")
+        if my_endo.empty:
+            st.caption("No Endo submissions yet under this name.")
+        else:
+            st.dataframe(
+                my_endo[["account_number", "endo_date", "placement", "submitted_at", "exported"]]
+                .rename(columns={
+                    "account_number": "ACCOUNT NUMBER",
+                    "endo_date": "ENDO DATE",
+                    "placement": "PLACEMENT",
+                    "submitted_at": "SUBMITTED AT",
+                    "exported": "EXPORTED",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        st.divider()
+
+        st.subheader("📊 My Auto Stat Submissions")
+        if my_as.empty:
+            st.caption("No Auto Stat submissions yet under this name.")
+        else:
+            st.dataframe(
+                my_as[[
+                    "account_number", "status_code", "ptp_date", "ptp_amount",
+                    "claim_paid_date", "claim_paid_amount", "submitted_at", "exported",
+                ]].rename(columns={
+                    "account_number": "ACCOUNT NUMBER",
+                    "status_code": "STATUS CODE",
+                    "ptp_date": "PTP DATE",
+                    "ptp_amount": "PTP AMOUNT",
+                    "claim_paid_date": "CLAIM PAID DATE",
+                    "claim_paid_amount": "CLAIM PAID AMOUNT",
+                    "submitted_at": "SUBMITTED AT",
+                    "exported": "EXPORTED",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        st.caption(
+            "\"EXPORTED\" = 1 means this entry has already been pulled into a CAMS/remarks "
+            "export by admin. \"SUBMITTED AT\" is your proof of when you sent it."
+        )
 
 
 # ========================================================================
@@ -1803,7 +2092,7 @@ def process_picker_page():
             </div>
         """, unsafe_allow_html=True)
 
-        c1, c2 = st.columns(2)
+        c1, c2, c3, c4 = st.columns(4)
         with c1:
             st.markdown('<div class="process-pick-btn">', unsafe_allow_html=True)
             if st.button("🧾 New Endo", use_container_width=True):
@@ -1814,6 +2103,18 @@ def process_picker_page():
             st.markdown('<div class="process-pick-btn">', unsafe_allow_html=True)
             if st.button("📊 Auto Stat", use_container_width=True):
                 st.session_state["agent_process"] = "autostat"
+                st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+        with c3:
+            st.markdown('<div class="process-pick-btn">', unsafe_allow_html=True)
+            if st.button("📋 My Submissions", use_container_width=True):
+                st.session_state["agent_process"] = "my_submissions"
+                st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+        with c4:
+            st.markdown('<div class="process-pick-btn">', unsafe_allow_html=True)
+            if st.button("🏆 Rankings", use_container_width=True):
+                st.session_state["agent_process"] = "rankings"
                 st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -2083,12 +2384,16 @@ def autostat_admin_dashboard():
         </div>
     """, unsafe_allow_html=True)
 
-    top_a, top_b = st.columns([1, 1])
+    top_a, top_b, top_c = st.columns([1, 1, 1])
     with top_a:
         if st.button("← Switch to Endo Admin"):
             st.session_state["admin_process"] = "endo"
             st.rerun()
     with top_b:
+        if st.button("📈 Agent Rankings"):
+            st.session_state["admin_process"] = "rankings"
+            st.rerun()
+    with top_c:
         if st.button("🔒 Log out"):
             st.session_state["is_admin"] = False
             st.session_state["logo_clicks"] = 0
@@ -2212,7 +2517,7 @@ def admin_picker_page():
         </div>
     """, unsafe_allow_html=True)
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown('<div class="process-pick-btn">', unsafe_allow_html=True)
         if st.button("🧾 Endo Admin", use_container_width=True):
@@ -2223,6 +2528,12 @@ def admin_picker_page():
         st.markdown('<div class="process-pick-btn">', unsafe_allow_html=True)
         if st.button("📊 Auto Stat Admin", use_container_width=True):
             st.session_state["admin_process"] = "autostat"
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+    with c3:
+        st.markdown('<div class="process-pick-btn">', unsafe_allow_html=True)
+        if st.button("📈 Agent Rankings", use_container_width=True):
+            st.session_state["admin_process"] = "rankings"
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -2241,6 +2552,8 @@ def admin_router():
         admin_dashboard()  # original, untouched
     elif admin_process == "autostat":
         autostat_admin_dashboard()
+    elif admin_process == "rankings":  # NEW (2026-09-17)
+        agent_rankings_page()
     else:
         admin_picker_page()
 
@@ -2292,6 +2605,16 @@ def main():
                 st.session_state["agent_process"] = None
                 st.rerun()
             autostat_form_page()
+        elif agent_process == "my_submissions":
+            if st.button("← Back to process picker"):
+                st.session_state["agent_process"] = None
+                st.rerun()
+            my_submissions_page()
+        elif agent_process == "rankings":
+            if st.button("← Back to process picker"):
+                st.session_state["agent_process"] = None
+                st.rerun()
+            public_rankings_page()
         else:
             process_picker_page()
 
