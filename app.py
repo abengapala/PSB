@@ -183,6 +183,40 @@ PTP DATA VIEW (new, additive, read-only):
     into render_rankings_body() so it shows on both the admin Agent
     Rankings page and the agent-facing public Rankings page — nothing
     else about rankings changed.
+
+====================================================================
+CHANGELOG — 2026-09-25
+====================================================================
+Added by : Claude, per Urban's follow-up request.
+
+ADDED: bulk_paste_ptp_monitoring_section() — a new admin-side bulk
+paste importer built specifically for the daily PTP Monitoring tracker
+(PSB_TRACKER.xlsx) column layout (Agent Name -> Placement, 17 columns),
+so Urban can paste the tracker's row block straight in instead of
+reformatting it into the Lark AUTOSTAT export shape first. Writes
+through the existing bulk_insert_autostat_submissions() — same
+function the current Auto Stat bulk-paste already uses — so it only
+ever appends new rows, never edits/deletes existing ones. Wired into
+autostat_admin_dashboard() as a new "④" section, after the existing
+Excel upload and Lark bulk-paste sections.
+
+ADDED: AGENT_NAME_TO_USERNAME + resolve_tracker_agent() — the tracker
+uses full names ("Eurie Bastasa") but the rest of the app tracks
+agents by CMS username ("EBASTASA"); this maps between them. Any
+tracker row whose agent name isn't in this dict is skipped at preview
+time with a warning (never silently mis-attributed) — update this dict
+whenever the roster changes. Includes an explicit entry for "Geraldine
+Sanjoauin" (missing the 'q') since that's the tracker's actual,
+long-standing spelling.
+
+ADDED: compute_ptp_conversion() + render_ptp_conversion_section() — a
+new read-only addition to the rankings page. The existing rankings
+count PTP and KEPT rows independently; this instead matches them by
+account_number per agent, so you can see how many of the SPECIFIC
+accounts an agent logged as PTP were later also logged as KEPT (i.e.
+an actual promise -> fulfilled conversion rate, not two independent
+totals). Wired into render_rankings_body(), right after the existing
+render_ptp_trend_section(scoped) call.
 ====================================================================
 """
 
@@ -221,6 +255,40 @@ AUTO_STAT_AGENTS = [
     "RHAMA",
     "STUPAS",
 ]
+
+# NEW (2026-09-25): maps the full names used in the PTP Monitoring
+# tracker to the CMS usernames above, for bulk_paste_ptp_monitoring_section().
+# Keys are lowercased, whitespace-normalized full names. Keep this in
+# sync with AUTO_STAT_AGENTS whenever the roster changes — a name not
+# found here gets skipped (with a warning) at import time rather than
+# guessed at, so it never silently attributes a row to the wrong agent.
+AGENT_NAME_TO_USERNAME = {
+    "aira borong": "ABORONG",
+    "charles cruz": "CJBCRUZ",
+    "jaymark mosende": "JEMOSENDE",
+    "chelsea sayson": "CSAYSON",
+    "eurie bastasa": "EBASTASA",
+    "geraldine sanjoauin": "GSANJOAQUIN",   # tracker's actual (typo'd) spelling
+    "geraldine sanjoaquin": "GSANJOAQUIN",  # correct spelling, just in case
+    "josafat galope": "JGALOPE",
+    "jhumir peña": "JSPENA",
+    "jhumir pena": "JSPENA",                # no-tilde fallback
+    "lalaine olayta": "LMOLAYTA",
+    "polo savedra": "PSAVEDRA",
+    "rodel hama": "RHAMA",
+    "shamira tupas": "STUPAS",
+    # "joshua romero" intentionally omitted — resigned, not in AUTO_STAT_AGENTS.
+    # Any tracker rows still under his name will show up as "not recognized"
+    # in the import preview, which is the correct/safe behavior.
+}
+
+
+def resolve_tracker_agent(raw_name: str) -> str:
+    """Looks up a tracker full name (any casing/spacing) and returns the
+    matching CMS username, or '' if not found."""
+    key = re.sub(r"\s+", " ", str(raw_name).strip().lower())
+    return AGENT_NAME_TO_USERNAME.get(key, "")
+
 
 STATUS_CODES = [
     "CALL - POS_UNATTENDED",
@@ -1226,6 +1294,108 @@ def bulk_insert_autostat_submissions(rows):
 
 
 # ========================================================================
+# NEW (2026-09-25): PTP Monitoring tracker paste parser
+# ========================================================================
+
+def _parse_ptp_tracker_paste(text):
+    """Parses rows copy-pasted straight from the PTP Monitoring tracker
+    (tab-separated), in this exact 17-column order (matches
+    PSB_TRACKER.xlsx):
+      0  AGENT NAME
+      1  DATE INPUTTED
+      2  ACCOUNT NUMBER
+      3  PTP DATE
+      4  HOLDATE
+      5  SCOREBAND
+      6  DPD
+      7  OB
+      8  CONFIRMED AMOUNT
+      9  FID
+     10  CONFIRMED DATE
+     11  OB (2nd)
+     12  ACCOUNT STATUS   (KEPT / PTP)
+     13  STATUS           (FULL UPDATE / VS)
+     14  MONTH
+     15  OK / BP
+     16  PLACEMENT
+
+    Returns (parsed_rows, errors). parsed_rows is already shaped for
+    bulk_insert_autostat_submissions() — that function already shifts
+    ptp_date/ptp_amount -> claim_paid_date/claim_paid_amount whenever
+    status_code contains "KEPT", so this parser always fills
+    ptp_date/ptp_amount from the tracker's PTP DATE / CONFIRMED AMOUNT
+    columns and lets that existing logic handle both PTP and KEPT rows
+    correctly.
+    """
+    parsed, errors = [], []
+
+    for i, row in enumerate(_parse_pasted_tsv(text), 1):
+        while len(row) < 17:
+            row.append("")
+
+        raw_agent         = row[0].strip()
+        date_inputted_raw = row[1].strip()
+        raw_account       = row[2].strip()
+        ptp_date_raw      = row[3].strip()
+        dpd               = row[6].strip()
+        confirmed_amt_raw = row[8].strip()
+        account_status    = row[12].strip().upper()   # KEPT / PTP
+        sub_status        = row[13].strip().upper()   # FULL UPDATE / VS
+        scoreband         = row[5].strip()
+        placement         = row[16].strip().upper()
+
+        if not raw_agent and not raw_account:
+            continue  # blank paste line
+
+        acct = normalize_account(raw_account)
+        if len(acct) < 10:
+            errors.append(f"Row {i}: invalid account number '{raw_account}'")
+            continue
+
+        collector = resolve_tracker_agent(raw_agent)
+        if not collector:
+            errors.append(
+                f"Row {i}: agent name '{raw_agent}' not recognized — "
+                f"add it to AGENT_NAME_TO_USERNAME, or this row will be skipped."
+            )
+            continue
+
+        if account_status not in ("KEPT", "PTP"):
+            errors.append(
+                f"Row {i}: unrecognized ACCOUNT STATUS '{row[12]}' "
+                f"(expected KEPT or PTP) — skipped."
+            )
+            continue
+
+        ptp_date = _parse_date_flex(ptp_date_raw)
+        ptp_amount = _parse_amount_str(confirmed_amt_raw)
+        submitted_dt = _parse_date_flex(date_inputted_raw) or date.today()
+
+        status_code = f"{account_status} - {sub_status or 'TRACKER IMPORT'}"
+        remarks = (
+            f"Imported from PTP Monitoring Tracker | "
+            f"Placement: {placement or '—'} | DPD: {dpd or '—'} | "
+            f"Scoreband: {scoreband or '—'}"
+        )
+
+        parsed.append({
+            "account_number":    acct,
+            "status_code":       status_code,
+            "remarks":           remarks,
+            "ptp_date":          ptp_date.isoformat() if ptp_date else "",
+            "ptp_amount":        round(ptp_amount, 2) if ptp_amount is not None else "",
+            "claim_paid_date":   "",
+            "claim_paid_amount": "",
+            "collector":         collector,
+            "submitted_at": datetime.combine(
+                submitted_dt, datetime.min.time()
+            ).isoformat(timespec="seconds"),
+        })
+
+    return parsed, errors
+
+
+# ========================================================================
 # BULK PASTE — UI sections (called from each admin dashboard)
 # ========================================================================
 
@@ -1519,6 +1689,58 @@ def bulk_paste_autostat_section():
 
 
 # ========================================================================
+# NEW (2026-09-25): UI — Bulk Paste, PTP Monitoring Tracker Import
+# ========================================================================
+
+def bulk_paste_ptp_monitoring_section():
+    """Admin pastes rows straight from the daily PTP Monitoring tracker
+    (Agent Name -> Placement, 17 columns). Works for both PTP and KEPT
+    rows — KEPT rows are automatically filed under Claim Paid via
+    bulk_insert_autostat_submissions()'s existing shift logic."""
+    st.subheader("④ Bulk Paste — PTP Monitoring Tracker Import")
+    st.caption(
+        "Copy the full row block from your daily PTP Monitoring tracker "
+        "(Agent Name through Placement — 17 columns) and paste it below. "
+        "Works for both PTP and KEPT rows — KEPT rows are automatically "
+        "filed under Claim Paid, same as the regular Auto Stat form."
+    )
+    raw = st.text_area(
+        "Paste tracker rows here",
+        height=220,
+        placeholder=(
+            "Eurie Bastasa\t9/1/2026\t001-388-06759873-7\t9/4/2026\t9/4/2026\t"
+            "0\t43\t908886.74\t25980.00\t\t\t908886.74\tPTP\tFULL UPDATE\t"
+            "9/1/2026\tOK\tFRONT END"
+        ),
+        key="bulk_ptp_tracker_paste",
+    )
+
+    if not raw.strip():
+        return
+
+    parsed, errors = _parse_ptp_tracker_paste(raw)
+
+    if errors:
+        for e in errors:
+            st.warning(e)
+
+    if parsed:
+        preview_df = pd.DataFrame(parsed)[[
+            "collector", "account_number", "status_code",
+            "ptp_date", "ptp_amount", "submitted_at",
+        ]]
+        st.caption(f"Preview — **{len(parsed)}** row(s) ready to import:")
+        st.dataframe(preview_df, use_container_width=True, hide_index=True)
+        if st.button(
+            f"✅ Confirm import {len(parsed)} tracker row(s)",
+            key="confirm_bulk_ptp_tracker",
+        ):
+            bulk_insert_autostat_submissions(parsed)
+            st.success(f"Imported {len(parsed)} row(s) successfully!")
+            st.rerun()
+
+
+# ========================================================================
 # NEW (2026-09-17): AGENT RANKINGS — read-only, admin-side
 # ========================================================================
 
@@ -1616,6 +1838,80 @@ def render_ptp_trend_section(df: pd.DataFrame):
         money[["AGENT", "PTP PROMISED (₱)", "KEPT (₱)"]],
         use_container_width=True,
         hide_index=True,
+    )
+
+
+# ========================================================================
+# NEW (2026-09-25): PTP -> KEPT CONVERSION — rankings addition
+# ========================================================================
+
+def compute_ptp_conversion(df: pd.DataFrame) -> pd.DataFrame:
+    """Per agent: how many distinct accounts they logged a PTP status
+    for, and of those, how many later also got a KEPT status logged for
+    the SAME account — i.e. the promise was actually fulfilled, not just
+    an independent count of PTPs vs KEPTs.
+
+    df must already have '_agent' and '_bucket' columns, exactly as
+    render_rankings_body() sets them up before calling this."""
+    work = df[["_agent", "account_number", "_bucket"]].copy()
+
+    ptp_accounts = (
+        work[work["_bucket"] == "PTP"]
+        .groupby("_agent")["account_number"]
+        .apply(set)
+    )
+    kept_accounts = (
+        work[work["_bucket"] == "KEPT"]
+        .groupby("_agent")["account_number"]
+        .apply(set)
+    )
+
+    rows = []
+    for agent, ptp_set in ptp_accounts.items():
+        kept_set = kept_accounts.get(agent, set())
+        converted = ptp_set & kept_set
+        total = len(ptp_set)
+        conv = len(converted)
+        rows.append({
+            "AGENT": agent,
+            "PTP ACCOUNTS": total,
+            "CONVERTED TO KEPT": conv,
+            "CONVERSION %": round(100 * conv / total, 1) if total else 0.0,
+        })
+
+    if not rows:
+        return pd.DataFrame(columns=["AGENT", "PTP ACCOUNTS", "CONVERTED TO KEPT", "CONVERSION %"])
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values("CONVERSION %", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+def render_ptp_conversion_section(df: pd.DataFrame):
+    """Additive, read-only. Called from render_rankings_body(), right
+    after render_ptp_trend_section(scoped), passing the same `scoped`
+    frame."""
+    conv_df = compute_ptp_conversion(df)
+    if conv_df.empty:
+        return
+
+    st.write("")
+    st.subheader("🔁 PTP → KEPT Conversion")
+    st.caption(
+        "Of the accounts an agent logged as PTP, how many were later "
+        "logged as KEPT for that same account."
+    )
+    st.dataframe(
+        conv_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "CONVERSION %": st.column_config.ProgressColumn(
+                "CONVERSION %", min_value=0, max_value=100, format="%.1f%%"
+            ),
+        },
     )
 
 
@@ -1727,6 +2023,10 @@ def render_rankings_body():
     # NEW (2026-09-17 v2): PTP trend chart + peso leaderboard, scoped to
     # the same period selection above. Additive — read-only.
     render_ptp_trend_section(scoped)
+
+    # NEW (2026-09-25): PTP -> KEPT conversion table, same scoped period.
+    # Additive — read-only.
+    render_ptp_conversion_section(scoped)
 
 
 def agent_rankings_page():
@@ -2845,6 +3145,9 @@ def autostat_admin_dashboard():
 
     st.divider()
     bulk_paste_autostat_section()
+
+    st.divider()
+    bulk_paste_ptp_monitoring_section()
 
 
 # ========================================================================
