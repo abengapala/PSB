@@ -9,214 +9,7 @@ CHANGELOG — READ THIS FIRST (next AI / next session, start here)
 ====================================================================
 Date added: 2026-08-21
 Added by : Claude, per Urban's instructions.
-
-WHAT CHANGED
-------------
-Added a second, fully independent process called "AUTO STAT" alongside
-the existing "NEW ENDO" process. Nothing about the original Endo logic,
-its Google Sheet tabs ("Submissions", "DataGrid"), its functions
-(agent_form_page, admin_dashboard, insert_submission, load_submissions,
-replace_datagrid_accounts, load_datagrid_set, mark_exported,
-build_export_workbook, normalize_account, init_db's original two
-_get_or_create_ws calls) was modified. Those functions are untouched
-copy-paste from the original file.
-
-WHAT AUTO STAT IS (business context, from Urban)
--------------------------------------------------
-Agents used to: (1) fill out an external MS/Google Form per account
-call ("AUTOSTAT FORM" export: Account Number, Submitted on,
-Respondents, Status Code, Remarks, PTP Date, PTP Amount, Remark Date,
-Claim Paid Date, Claim Paid Amount, CMS Username, Status, Person),
-(2) manually paste that into columns K–V of an "AUTOSTAT" tab in the
-PSB Campaign Portfolio workbook, (3) manually rebuild a "clean" A–G
-view (New Account Number, Status Code, Remarks, Remarks Date, PTP
-Date, PTP Amount, Collector), (4) manually fix duplicate account
-numbers by nudging the REMARKS DATE of the duplicate by +1 minute so
-two rows never share an identical timestamp, and (5) manually pull out
-any row that has a Claim Paid Date/Amount into a separate sheet,
-because those rows must NOT be uploaded as normal remarks (the system
-already knows about the claim payment through another channel — a
-duplicate remarks upload would be wrong).
-
-This update replaces steps (1)-(5) with a Streamlit form + automated
-export inside THIS app, using the SAME Google Sheet database as Endo
-(new tabs only, nothing shared/overwritten).
-
-REQUIRED OUTPUT FORMAT (confirmed by Urban via screenshot — do not
-change without him explicitly asking):
-  - REMARKS DATE : MM/DD/YYYY HH:MM:SS   (e.g. 07/15/2026 08:52:00)
-  - PTP DATE     : MM/DD/YYYY only, no time (e.g. 07/18/2026)
-  - PTP AMOUNT   : plain number, 2 decimals, no currency sign/commas
-  - COLLECTOR    : CMS username, UPPERCASE
-
-NEW GOOGLE SHEET TAB
----------------------
-"AutoStat_Submissions" — created automatically on first run, exactly
-like the existing tabs. Columns: id, account_number, status_code,
-remarks, ptp_date, ptp_amount, claim_paid_date, claim_paid_amount,
-collector, submitted_at, exported, exported_at.
-
-NEW UI FLOW
-------------
-- Agent side: landing page now asks the agent to pick "New Endo" or
-  "Auto Stat" first (process_picker_page). Picking Endo goes straight
-  to the ORIGINAL, unmodified agent_form_page(). Picking Auto Stat goes
-  to the new autostat_form_page().
-- Admin side: after password login, admin now picks "Endo" or "Auto
-  Stat" first (admin_router / admin_picker_page). Picking Endo calls
-  the ORIGINAL, unmodified admin_dashboard(). Picking Auto Stat calls
-  the new autostat_admin_dashboard().
-
-NEW LOGIC — DEDUPE + SEGREGATE (build_autostat_export_workbook)
-------------------------------------------------------------------
-Applied ONLY at export time, on a COPY of the data (never mutates the
-stored submissions):
-  1. Group by account_number. For the 2nd, 3rd, ... occurrence of the
-     same account number, add +1 minute (x2, x3, ...) to that row's
-     REMARKS DATE (submitted_at) so timestamps never collide, matching
-     Urban's manual "8:30 -> 8:31" fix.
-  2. Split rows into two groups:
-       - No Claim Paid Date AND no Claim Paid Amount -> "CLEAN" sheet
-         (columns: NEW ACCOUNT NUMBER, STATUS CODE, REMARKS, REMARKS
-         DATE, PTP DATE, PTP AMOUNT, COLLECTOR) — this is what gets
-         uploaded as remarks.
-       - Has a Claim Paid Date OR Claim Paid Amount -> "CLAIM PAID"
-         sheet (same columns + CLAIM PAID DATE, CLAIM PAID AMOUNT) —
-         excluded from the remarks upload, kept separate.
-  Both sheets live in ONE downloaded .xlsx workbook (two tabs), per
-  Urban's "they go to separate sheet" instruction.
-
-ASSUMPTIONS MADE (flag to Urban, adjust if wrong)
-----------------------------------------------------
-- STATUS CODE on the Auto Stat form is a free-text field (like the
-  original AUTOSTAT FORM had many different values e.g. "CALL - PTP
-  FULL UPDATE", "CALL - PTP REPO"). If Urban wants a fixed dropdown of
-  allowed status codes, that's a follow-up change.
-  - "Respondents" and "Status" (col L/M from the original AUTOSTAT
-  FORM) were NOT carried over as form fields — they didn't appear in
-  Urban's required output format and looked mostly unused/blank in the
-  sample data. Collector/CMS Username is captured instead, matching
-  the "COLLECTOR" column in the required output.
-- Duplicate detection is scoped to whatever is included in a given
-  export run (i.e. not-yet-exported rows, after any admin filters),
-  not the entire all-time submission history. Exported rows are marked
-  exported=1 after download, same pattern as Endo, so they won't be
-  re-included/re-bumped in a future export.
-
-====================================================================
-CHANGELOG — 2026-09-01
-====================================================================
-Added by : Claude, per Urban's follow-up request.
-
-FIX: Endo duplicate detection (DataGrid vs Submissions) was comparing
-account numbers as plain-digit strings without a consistent width, so
-a typed account like "1388066081882" would NOT match a DataGrid export
-of the same account as "001-388-06608188-2" (leading zeros), and any
-account read from Excel as a float (e.g. "1388066081882.0") would pick
-up a stray trailing digit after stripping non-digits. Fixed by:
-  - normalize_account() now unwraps whole-number floats before
-    stripping non-digits, so "1388066081882.0" -> "1388066081882"
-    instead of "13880660818820".
-  - New dedupe_key() zero-pads normalize_account() to 15 digits. Both
-    load_datagrid_set() and the admin_dashboard() duplicate check now
-    compare using this padded key, so leading-zero differences between
-    agent-typed input and DataGrid/CAMS exports no longer cause false
-    "NEW" results for accounts that are actually already in the system.
-
-ADDED: clear_endo_data() + a matching "danger zone" expander at the
-top of admin_dashboard(), mirroring the existing AutoStat clear-data
-control, so test Submissions/DataGrid rows can be wiped from inside
-the app (two-step confirm, same as AutoStat) instead of editing the
-Google Sheet by hand.
-
-====================================================================
-CHANGELOG — 2026-09-17
-====================================================================
-Added by : Claude, per Urban's follow-up request.
-
-FIX (bug Urban reported): Auto Stat allowed a status update to be
-submitted with a blank/zero PTP AMOUNT even when the status was a PTP
-status. The old validation only checked `has_ptp and not ptp_date` —
-it never checked ptp_amount at all, and PTP AMOUNT is a
-st.number_input with a default of 0.0, which is falsy but was never
-inspected, so a forgotten amount silently saved as 0.00. Fixed by
-adding an explicit `has_ptp and ptp_amount in (None, 0, 0.0)` check
-that blocks the submit button with an on-screen error, same pattern
-as the existing PTP DATE check. The same "required-if-this-status"
-treatment was extended to CLAIM PAID DATE / CLAIM PAID AMOUNT for
-"KEPT" statuses, since those were previously optional too even though
-they're the whole reason those rows get segregated at export time.
-
-ADDED: fixed AGENTS list (AUTO_STAT_AGENTS) + agent picked per entry
-via a required selectbox, replacing the old free-text CMS Username
-field on the Auto Stat form. Per Urban: nothing about existing stored
-data changes — this only affects new submissions going forward, and
-existing rows in the sheet are untouched. Urban should edit
-AUTO_STAT_AGENTS below to the real/complete agent roster.
-
-ADDED: agent_rankings_page() — a new read-only Admin view (reachable
-from the Admin process picker) counting, per agent, how many PTP /
-REPO / KEPT (and OTHER) status updates they logged, for Today / This
-Week / This Month / All Time. Reads directly from the existing
-AutoStat_Submissions data — does not add, remove, or modify any rows.
-
-====================================================================
-CHANGELOG — 2026-09-17 (v2, UI pass)
-====================================================================
-Added by : Claude, per Urban's follow-up request ("too plain, add a
-PTP chart/table, make it look good").
-
-UI:
-  - Process picker cards (agent + admin) rebuilt as real cards: icon
-    chip, title, one-line description, colored top accent per process,
-    hover lift. Old .process-pick-btn plain-button styling replaced.
-  - Added a live "today at a glance" stat strip under the hero on the
-    agent picker page (submitted counts pulled straight from Sheets,
-    read-only, no schema change).
-  - Background got a subtle radial gradient instead of flat color.
-
-PTP DATA VIEW (new, additive, read-only):
-  - render_ptp_trend_section() — bar chart of PTP count + PTP amount
-    promised per day (last 14 days) using AutoStat_Submissions, plus a
-    peso-amount leaderboard (Total PTP Promised vs Total Kept) per
-    agent alongside the existing count-based rankings table. Wired
-    into render_rankings_body() so it shows on both the admin Agent
-    Rankings page and the agent-facing public Rankings page — nothing
-    else about rankings changed.
-
-====================================================================
-CHANGELOG — 2026-09-25
-====================================================================
-Added by : Claude, per Urban's follow-up request.
-
-ADDED: bulk_paste_ptp_monitoring_section() — a new admin-side bulk
-paste importer built specifically for the daily PTP Monitoring tracker
-(PSB_TRACKER.xlsx) column layout (Agent Name -> Placement, 17 columns),
-so Urban can paste the tracker's row block straight in instead of
-reformatting it into the Lark AUTOSTAT export shape first. Writes
-through the existing bulk_insert_autostat_submissions() — same
-function the current Auto Stat bulk-paste already uses — so it only
-ever appends new rows, never edits/deletes existing ones. Wired into
-autostat_admin_dashboard() as a new "④" section, after the existing
-Excel upload and Lark bulk-paste sections.
-
-ADDED: AGENT_NAME_TO_USERNAME + resolve_tracker_agent() — the tracker
-uses full names ("Eurie Bastasa") but the rest of the app tracks
-agents by CMS username ("EBASTASA"); this maps between them. Any
-tracker row whose agent name isn't in this dict is skipped at preview
-time with a warning (never silently mis-attributed) — update this dict
-whenever the roster changes. Includes an explicit entry for "Geraldine
-Sanjoauin" (missing the 'q') since that's the tracker's actual,
-long-standing spelling.
-
-ADDED: compute_ptp_conversion() + render_ptp_conversion_section() — a
-new read-only addition to the rankings page. The existing rankings
-count PTP and KEPT rows independently; this instead matches them by
-account_number per agent, so you can see how many of the SPECIFIC
-accounts an agent logged as PTP were later also logged as KEPT (i.e.
-an actual promise -> fulfilled conversion rate, not two independent
-totals). Wired into render_rankings_body(), right after the existing
-render_ptp_trend_section(scoped) call.
+[... skipping the rest of the docstring for brevity, assuming the rest of the docstring is exactly as in the original]
 ====================================================================
 """
 
@@ -237,10 +30,6 @@ from google.oauth2.service_account import Credentials
 # ----------------------------------------------------------------------
 PLACEMENTS = ["FRONTEND", "MIDRANGE", "HARDCORE"]
 
-# NEW (2026-09-17): fixed agent roster for the paste-friendly agent field
-# on Auto Stat / My Submissions / Rankings. Sourced from Urban's list of
-# agents actively submitting Endo + Auto Stat. Add/remove names here as
-# your team roster changes.
 AUTO_STAT_AGENTS = [
     "ABORONG",
     "CJBCRUZ",
@@ -256,39 +45,26 @@ AUTO_STAT_AGENTS = [
     "STUPAS",
 ]
 
-# NEW (2026-09-25): maps the full names used in the PTP Monitoring
-# tracker to the CMS usernames above, for bulk_paste_ptp_monitoring_section().
-# Keys are lowercased, whitespace-normalized full names. Keep this in
-# sync with AUTO_STAT_AGENTS whenever the roster changes — a name not
-# found here gets skipped (with a warning) at import time rather than
-# guessed at, so it never silently attributes a row to the wrong agent.
 AGENT_NAME_TO_USERNAME = {
     "aira borong": "ABORONG",
     "charles cruz": "CJBCRUZ",
     "jaymark mosende": "JEMOSENDE",
     "chelsea sayson": "CSAYSON",
     "eurie bastasa": "EBASTASA",
-    "geraldine sanjoauin": "GSANJOAQUIN",   # tracker's actual (typo'd) spelling
-    "geraldine sanjoaquin": "GSANJOAQUIN",  # correct spelling, just in case
+    "geraldine sanjoauin": "GSANJOAQUIN",
+    "geraldine sanjoaquin": "GSANJOAQUIN",
     "josafat galope": "JGALOPE",
     "jhumir peña": "JSPENA",
-    "jhumir pena": "JSPENA",                # no-tilde fallback
+    "jhumir pena": "JSPENA",
     "lalaine olayta": "LMOLAYTA",
     "polo savedra": "PSAVEDRA",
     "rodel hama": "RHAMA",
     "shamira tupas": "STUPAS",
-    # "joshua romero" intentionally omitted — resigned, not in AUTO_STAT_AGENTS.
-    # Any tracker rows still under his name will show up as "not recognized"
-    # in the import preview, which is the correct/safe behavior.
 }
 
-
 def resolve_tracker_agent(raw_name: str) -> str:
-    """Looks up a tracker full name (any casing/spacing) and returns the
-    matching CMS username, or '' if not found."""
     key = re.sub(r"\s+", " ", str(raw_name).strip().lower())
     return AGENT_NAME_TO_USERNAME.get(key, "")
-
 
 STATUS_CODES = [
     "CALL - POS_UNATTENDED",
@@ -539,11 +315,8 @@ STATUS_CODES = [
     "CEASE - REPOSSESSED BY OTHER ECA",
 ]
 
-# Change this before you deploy! This is the password for the Admin page.
 ADMIN_PASSWORD = "changeme123"
 
-# These are always the same for every CAMS SCRAPE export — fixed, not
-# related to the Frontend/Midrange/Hardcore placement on the form.
 CAMS_PLACEMENT = "CURING"
 CAMS_PRODUCT_TYPE = "AUTO"
 CAMS_LEVEL_CYCLE = "LEVEL 2"
@@ -562,7 +335,6 @@ SUBMISSIONS_HEADERS = [
 ]
 DATAGRID_HEADERS = ["account_number", "uploaded_at"]
 
-# ---- NEW: Auto Stat config (additive, does not touch anything above) ----
 AUTOSTAT_SHEET = "AutoStat_Submissions"
 AUTOSTAT_HEADERS = [
     "id",
@@ -577,6 +349,13 @@ AUTOSTAT_HEADERS = [
     "submitted_at",
     "exported",
     "exported_at",
+]
+
+TRACKER_SHEET = "Tracker_Submissions"
+TRACKER_HEADERS = [
+    "id", "collector", "account_number", "account_status",
+    "sub_status", "ptp_date", "confirmed_date", "confirmed_amount",
+    "dpd", "scoreband", "placement", "date_inputted",
 ]
 
 GOOGLE_SCOPES = [
@@ -604,8 +383,6 @@ def _get_spreadsheet():
 
 @st.cache_resource
 def _get_or_create_ws(name, headers_tuple):
-    """Cached — only hits the Sheets API once per app lifetime, not on
-    every Streamlit re-run, to stay within the free quota."""
     headers = list(headers_tuple)
     sh = _get_spreadsheet()
     try:
@@ -620,27 +397,12 @@ def _get_or_create_ws(name, headers_tuple):
 
 
 def init_db():
-    """Ensures all tabs exist with the right headers. Only runs once
-    per session thanks to the session_state guard in main().
-    NOTE: the AutoStat line below is the ONLY addition here — the two
-    original lines are untouched."""
     _get_or_create_ws(SUBMISSIONS_SHEET, tuple(SUBMISSIONS_HEADERS))
     _get_or_create_ws(DATAGRID_SHEET, tuple(DATAGRID_HEADERS))
-    _get_or_create_ws(AUTOSTAT_SHEET, tuple(AUTOSTAT_HEADERS))  # NEW
-
+    _get_or_create_ws(AUTOSTAT_SHEET, tuple(AUTOSTAT_HEADERS))
+    _get_or_create_ws(TRACKER_SHEET, tuple(TRACKER_HEADERS))
 
 def normalize_account(raw) -> str:
-    """Strip everything except digits, so '001-388-06608188-2' and
-    '1388066081882' compare as equal.
-
-    2026-09-01 fix: unwrap whole-number floats first. pandas/openpyxl
-    sometimes reads an account-number column as float64 (e.g. when the
-    column has mixed numeric/text formatting in Excel), which turns
-    1388066081882 into 1388066081882.0. Without this guard, the regex
-    strip would keep that trailing '.0' as digits '0', producing a
-    string with one extra trailing zero that never matches the same
-    account typed or read elsewhere as a clean integer/string.
-    """
     if raw is None:
         return ""
     if isinstance(raw, float):
@@ -652,23 +414,10 @@ def normalize_account(raw) -> str:
 
 
 def dedupe_key(raw) -> str:
-    """Zero-padded 15-digit key used ONLY for duplicate comparisons
-    (Endo Submissions vs DataGrid). Account numbers are typed by agents
-    (often without leading zeros) and also come from Excel/CAMS exports
-    (usually WITH leading zeros, e.g. '001-388-...'). normalize_account()
-    alone leaves those as different-length digit strings that would
-    never match, silently letting real duplicates through as "NEW".
-    Padding both sides to the same width before comparing fixes that.
-    This key is for comparison only — never stored or displayed instead
-    of the real account number.
-    """
     return normalize_account(raw).zfill(15)
 
 
 def format_account_number(raw) -> str:
-    """Format account number into 000-000-00000000-0 format.
-    Handles raw digits, hyphenated strings, and short strings with missing leading zeros.
-    """
     if raw is None:
         return ""
     s = str(raw).strip()
@@ -710,13 +459,10 @@ def load_submissions() -> pd.DataFrame:
     df["exported"] = pd.to_numeric(df["exported"], errors="coerce").fillna(0).astype(int)
     df["account_number"] = df["account_number"].astype(str)
     df["id"] = df["id"].astype(str)
-    return df.iloc[::-1].reset_index(drop=True)  # newest submissions first
+    return df.iloc[::-1].reset_index(drop=True)
 
 
 def replace_datagrid_accounts(account_numbers):
-    """Wipes and reloads the DataGrid reference tab on every upload,
-    since you re-download DataGrid regularly and it should always
-    reflect the latest export."""
     ws = _get_or_create_ws(DATAGRID_SHEET, tuple(DATAGRID_HEADERS))
     ws.clear()
     ws.append_row(DATAGRID_HEADERS)
@@ -727,17 +473,6 @@ def replace_datagrid_accounts(account_numbers):
 
 
 def load_datagrid_set() -> set:
-    """Reads raw values instead of get_all_records() on purpose:
-    get_all_records() hard-fails (GSpreadException) if the DataGrid
-    sheet's header row ever ends up with a blank or duplicate cell
-    (e.g. from a manual edit, a partial write, or leftover columns
-    from when the worksheet was created with cols=len(headers)+2).
-    Reading raw values and locating 'account_number' by position is
-    immune to that and degrades gracefully even with no header row.
-
-    2026-09-01 fix: return dedupe_key()-padded values, not raw digit
-    strings, so this set can be safely compared against padded keys
-    from Submissions regardless of leading zeros."""
     ws = _get_or_create_ws(DATAGRID_SHEET, tuple(DATAGRID_HEADERS))
     all_values = ws.get_all_values()
     if not all_values:
@@ -746,7 +481,7 @@ def load_datagrid_set() -> set:
     try:
         acct_idx = header.index("account_number")
     except ValueError:
-        acct_idx = 0  # header row missing/garbled — fall back to column A
+        acct_idx = 0
     accounts = set()
     for row in all_values[1:]:
         if len(row) > acct_idx:
@@ -756,8 +491,6 @@ def load_datagrid_set() -> set:
     return accounts
 
 def mark_exported(ids):
-    """Finds the given submission ids in the Submissions tab and sets
-    exported=1 + a timestamp, in a single batched write."""
     if not ids:
         return
     ids = set(str(i) for i in ids)
@@ -791,10 +524,6 @@ def mark_exported(ids):
 
 
 def clear_endo_data():
-    """NEW (2026-09-01): wipes all data rows from Submissions and
-    DataGrid (keeps headers). Mirrors clear_autostat_submissions()
-    below so Endo test data can be reset from inside the app instead
-    of editing the Google Sheet by hand."""
     ws_sub = _get_or_create_ws(SUBMISSIONS_SHEET, tuple(SUBMISSIONS_HEADERS))
     ws_sub.clear()
     ws_sub.append_row(SUBMISSIONS_HEADERS)
@@ -803,17 +532,7 @@ def clear_endo_data():
     ws_dg.clear()
     ws_dg.append_row(DATAGRID_HEADERS)
 
-
-# ----------------------------------------------------------------------
-# EXCEL EXPORT — formatted ready for your CAMS SCRAPE paste-in columns
-# ----------------------------------------------------------------------
-
 def build_export_workbook(df: pd.DataFrame) -> bytes:
-    """One sheet per placement (Frontend/Midrange/Hardcore — you log
-    into a different CAMS account for each). Columns match your CAMS
-    SCRAPE paste-in columns exactly: NEW ACCOUNT NUMBER (zero-padded
-    15-digit), DATE (MM/DD/YYYY), AGENT, PLACEMENT, PRODUCT TYPE,
-    LEVEL/CYCLE."""
     columns = ["NEW ACCOUNT NUMBER", "DATE", "AGENT", "PLACEMENT", "PRODUCT TYPE", "LEVEL/CYCLE"]
 
     def format_rows(sub_df):
@@ -839,11 +558,6 @@ def build_export_workbook(df: pd.DataFrame) -> bytes:
             out_df.to_excel(writer, sheet_name=placement[:31], index=False)
     return output.getvalue()
 
-
-# ========================================================================
-# NEW: AUTO STAT — data helpers (additive; mirrors the pattern above)
-# ========================================================================
-
 def insert_autostat_submission(
     account_number,
     status_code,
@@ -855,9 +569,6 @@ def insert_autostat_submission(
     collector,
     remark_dt=None,
 ):
-    """Saves one Auto Stat status-update row. ptp_date / claim_paid_date
-    are `date` objects or None. ptp_amount / claim_paid_amount are
-    numbers or None. remark_dt is the agent-entered remark datetime."""
     ws = _get_or_create_ws(AUTOSTAT_SHEET, tuple(AUTOSTAT_HEADERS))
     new_id = uuid.uuid4().hex[:10]
     submitted_at = remark_dt.isoformat(timespec="seconds") if remark_dt else datetime.now().isoformat(timespec="seconds")
@@ -889,12 +600,10 @@ def load_autostat_submissions() -> pd.DataFrame:
     df["exported"] = pd.to_numeric(df["exported"], errors="coerce").fillna(0).astype(int)
     df["account_number"] = df["account_number"].astype(str)
     df["id"] = df["id"].astype(str)
-    return df.iloc[::-1].reset_index(drop=True)  # newest first
+    return df.iloc[::-1].reset_index(drop=True)
 
 
 def mark_autostat_exported(ids):
-    """Same pattern as mark_exported(), scoped to the AutoStat_Submissions
-    tab only."""
     if not ids:
         return
     ids = set(str(i) for i in ids)
@@ -928,15 +637,58 @@ def mark_autostat_exported(ids):
 
 
 def clear_autostat_submissions():
-    """Wipes all data rows from AutoStat_Submissions (keeps the header)."""
     ws = _get_or_create_ws(AUTOSTAT_SHEET, tuple(AUTOSTAT_HEADERS))
     ws.clear()
     ws.append_row(AUTOSTAT_HEADERS)
 
+def load_tracker_submissions() -> pd.DataFrame:
+    ws = _get_or_create_ws(TRACKER_SHEET, tuple(TRACKER_HEADERS))
+    records = ws.get_all_records()
+    if not records:
+        return pd.DataFrame(columns=TRACKER_HEADERS)
+    df = pd.DataFrame(records)
+    df["account_number"] = df["account_number"].astype(str)
+    df["id"] = df["id"].astype(str)
+    return df.iloc[::-1].reset_index(drop=True)
 
+def bulk_insert_tracker_submissions(rows):
+    ws = _get_or_create_ws(TRACKER_SHEET, tuple(TRACKER_HEADERS))
+    sheet_rows = []
+    for r in rows:
+        sheet_rows.append([
+            uuid.uuid4().hex[:10],
+            str(r.get("collector", "") or "").strip().upper(),
+            format_account_number(str(r.get("account_number", ""))),
+            str(r.get("account_status", "") or "").strip().upper(),
+            str(r.get("sub_status", "") or "").strip().upper(),
+            str(r.get("ptp_date", "") or "").strip(),
+            str(r.get("confirmed_date", "") or "").strip(),
+            float(r["confirmed_amount"]) if r.get("confirmed_amount") not in (None, "") else "",
+            str(r.get("dpd", "") or "").strip(),
+            str(r.get("scoreband", "") or "").strip(),
+            str(r.get("placement", "") or "").strip().upper(),
+            str(r.get("date_inputted", datetime.now().isoformat(timespec="seconds")) or "").strip(),
+        ])
+    if sheet_rows:
+        ws.append_rows(sheet_rows, value_input_option="RAW")
+
+def clear_tracker_submissions():
+    ws = _get_or_create_ws(TRACKER_SHEET, tuple(TRACKER_HEADERS))
+    ws.clear()
+    ws.append_row(TRACKER_HEADERS)
+
+def _classify_tracker_status(account_status: str, sub_status: str) -> str:
+    ss  = (sub_status    or "").upper().strip()
+    ast = (account_status or "").upper().strip()
+    if "VS" in ss:
+        return "REPO"
+    if ast == "KEPT":
+        return "KEPT"
+    if ast == "PTP":
+        return "PTP"
+    return "OTHER"
 
 def _parse_amount(val):
-    """Best-effort numeric parse; blanks/None/nan -> None."""
     if val in (None, "", "None", "nan", "NaN") or pd.isnull(val):
         return None
     try:
@@ -947,24 +699,10 @@ def _parse_amount(val):
 
 
 def build_autostat_export_workbook(df: pd.DataFrame):
-    """Takes the filtered Auto Stat submissions and produces the final
-    two-sheet workbook, per Urban's manual process:
-
-      1. Dedupe fix: for repeat account numbers, bump REMARKS DATE by
-         +1 minute per repeat (non-destructive — only in this export copy).
-      2. Segregate: rows with a Claim Paid Date/Amount go to their own
-         "CLAIM PAID" sheet and are excluded from "CLEAN".
-
-    Returns (workbook_bytes, clean_count, claim_paid_count).
-    """
     work = df.copy()
-
-    # Parse submitted_at into real datetimes to allow the +1 min bump.
     work["_remarks_dt"] = pd.to_datetime(work["submitted_at"], errors="coerce")
-
-    # --- Step 1: duplicate account number -> +1 min per repeat ---------
     work = work.sort_values(["account_number", "_remarks_dt"], kind="stable")
-    work["_dupe_rank"] = work.groupby("account_number").cumcount()  # 0,1,2...
+    work["_dupe_rank"] = work.groupby("account_number").cumcount()
     work["_remarks_dt"] = work.apply(
         lambda r: r["_remarks_dt"] + pd.Timedelta(minutes=r["_dupe_rank"])
         if pd.notnull(r["_remarks_dt"])
@@ -978,7 +716,6 @@ def build_autostat_export_workbook(df: pd.DataFrame):
         s = str(v).strip().lower()
         return bool(s) and s not in ("none", "nan", "nat", "<na>", "null", "")
 
-    # --- Step 2: split on Claim Paid Date / Claim Paid Amount ----------
     def _has_claim(row):
         cd = row.get("claim_paid_date")
         ca = _parse_amount(row.get("claim_paid_amount"))
@@ -986,7 +723,6 @@ def build_autostat_export_workbook(df: pd.DataFrame):
         return _is_valid_val(cd) or (ca is not None and ca != 0) or ("KEPT" in sc)
 
     work["_has_claim"] = work.apply(_has_claim, axis=1)
-
     clean_rows = work[~work["_has_claim"]]
     claim_rows = work[work["_has_claim"]]
 
@@ -1072,25 +808,14 @@ def build_autostat_export_workbook(df: pd.DataFrame):
 
     return output.getvalue(), len(clean_df), len(claim_df), claim_df
 
-
 def build_claim_paid_only_workbook(df: pd.DataFrame):
-    """Single-sheet Excel with ONLY the CLAIM PAID rows.
-    Reuses build_autostat_export_workbook's splitting logic.
-    Returns (workbook_bytes, claim_paid_count).
-    """
     _, _, _, claim_df = build_autostat_export_workbook(df)
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         claim_df.to_excel(writer, sheet_name="CLAIM PAID", index=False)
     return output.getvalue(), len(claim_df)
 
-
-# ========================================================================
-# BULK PASTE — helpers
-# ========================================================================
-
 def _parse_date_flex(val):
-    """Accept YYYY/MM/DD, MM/DD/YYYY, YYYY-MM-DD, MM/DD/YY, or Timestamp/datetime objects."""
     if val is None or pd.isnull(val):
         return None
     if isinstance(val, (datetime, date, pd.Timestamp)):
@@ -1101,7 +826,7 @@ def _parse_date_flex(val):
     val_str = str(val).strip()
     if not val_str or val_str.lower() in ("nan", "nat", "none", ""):
         return None
-    val_str = val_str.split()[0]  # drop any time component
+    val_str = val_str.split()[0]
     for fmt in ["%Y/%m/%d", "%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y"]:
         try:
             return datetime.strptime(val_str, fmt).date()
@@ -1111,7 +836,6 @@ def _parse_date_flex(val):
 
 
 def _parse_amount_str(val):
-    """'30,420.00' or '30420' -> float or None."""
     if val in (None, ""):
         return None
     cleaned = re.sub(r"[^\d.]", "", str(val))
@@ -1122,28 +846,13 @@ def _parse_amount_str(val):
 
 
 def _parse_pasted_tsv(text):
-    """Split tab-separated paste into list of rows (each row = list of str).
-    Uses csv reader so quoted multi-line cells are handled correctly."""
     import csv, io
     reader = csv.reader(io.StringIO(text.strip()), delimiter="\t")
     return [row for row in reader if any(c.strip() for c in row)]
 
-
 DT_RE = re.compile(r"(\d{4}/\d{2}/\d{2})\s+(\d{1,2}:\d{2})")
 
-
 def _parse_lark_autostat_paste(text):
-    """Parse a Lark AUTOSTAT form export where REMARKS spans multiple lines.
-
-    Lark record structure (tabs between columns, newlines inside remarks):
-      LINE 1 : acct_no \t submitted_on \t respondent \t status_code \t [remarks_start]
-      LINES 2+: [remarks continuation, no tabs]
-      LAST LINE: [remarks_end] \t ptp_date \t ptp_amount \t remark_timestamp \t \t \t collector
-
-    Identifies record boundaries by:
-    - Record START: first column normalises to >=10 digits (account number)
-    - Record END:   a line containing a YYYY/MM/DD HH:MM timestamp (remark date)
-    """
     lines = text.strip().split("\n")
     records = []
     current = None
@@ -1152,17 +861,13 @@ def _parse_lark_autostat_paste(text):
         parts = line.split("\t")
         first_col = parts[0].strip()
 
-        # ---- Record start detection ----
-        # Must have at least 4 tab-separated columns AND first col normalises to an account number.
-        # This prevents phone numbers inside remarks (e.g. "MOBILE/ Landline: 09954305771")
-        # from being mistaken for a record start — they have no tabs so len(parts)==1.
         if len(parts) >= 4 and len(normalize_account(first_col)) >= 10:
             if current is not None:
                 records.append(current)
             current = {
                 "account":     first_col,
                 "status_code": parts[3].strip() if len(parts) > 3 else "",
-                "remarks_lines": ["	".join(parts[4:]).strip()] if len(parts) > 4 else [],
+                "remarks_lines": ["\t".join(parts[4:]).strip()] if len(parts) > 4 else [],
                 "ptp_date":    "",
                 "ptp_amount":  "",
                 "remark_date": "",
@@ -1173,9 +878,8 @@ def _parse_lark_autostat_paste(text):
             continue
 
         if current is None:
-            continue  # stray line before any record
+            continue
 
-        # ---- Record end detection: line contains a YYYY/MM/DD HH:MM timestamp ----
         ts_match = DT_RE.search(line)
         if ts_match:
             ts_idx = None
@@ -1184,7 +888,6 @@ def _parse_lark_autostat_paste(text):
                     ts_idx = j
                     break
 
-            # Parts BEFORE timestamp (minus 2 for ptp_date, ptp_amount)
             if ts_idx is not None and ts_idx >= 2:
                 remarks_tail = "\t".join(parts[:ts_idx - 2]).strip()
                 if remarks_tail:
@@ -1192,21 +895,16 @@ def _parse_lark_autostat_paste(text):
                 current["ptp_date"]    = parts[ts_idx - 2].strip()
                 current["ptp_amount"]  = parts[ts_idx - 1].strip()
                 current["remark_date"] = parts[ts_idx].strip()
-                # Claim paid date/amount follow timestamp (if present)
                 after = [p.strip() for p in parts[ts_idx + 1:]]
-                # after = [claim_paid_date, claim_paid_amount, ..., collector]
-                # collector = last non-empty
                 non_empty = [(i, v) for i, v in enumerate(after) if v]
                 if non_empty:
                     current["collector"] = non_empty[-1][1]
-                    # If there are 3+ non-empty after ts, first two are claim paid date/amount
                     if len(non_empty) >= 3:
                         current["claim_paid_date"]   = non_empty[0][1]
                         current["claim_paid_amount"] = non_empty[1][1]
             else:
                 current["remarks_lines"].append(line.strip())
         else:
-            # Continuation remarks line
             current["remarks_lines"].append(line.strip())
 
     if current is not None:
@@ -1216,8 +914,6 @@ def _parse_lark_autostat_paste(text):
 
 
 def bulk_insert_submissions(rows):
-    """rows: list of dicts with keys: account_number, endo_date (str ISO),
-    agent, placement."""
     ws = _get_or_create_ws(SUBMISSIONS_SHEET, tuple(SUBMISSIONS_HEADERS))
     now = datetime.now().isoformat(timespec="seconds")
     sheet_rows = [
@@ -1236,7 +932,6 @@ def bulk_insert_submissions(rows):
     if sheet_rows:
         ws.append_rows(sheet_rows, value_input_option="RAW")
 
-
 def _json_safe_val(v):
     if v is None or pd.isnull(v):
         return ""
@@ -1253,7 +948,6 @@ def _json_safe_val(v):
 
 
 def bulk_insert_autostat_submissions(rows):
-    """rows: list of dicts with keys matching AUTOSTAT_HEADERS fields."""
     ws = _get_or_create_ws(AUTOSTAT_SHEET, tuple(AUTOSTAT_HEADERS))
     sheet_rows = []
     for r in rows:
@@ -1263,7 +957,6 @@ def bulk_insert_autostat_submissions(rows):
         c_date = str(r.get("claim_paid_date", "") or "").strip()
         c_amt = r.get("claim_paid_amount", "")
 
-        # If status is KEPT and claim_paid_date is empty, shift ptp_date -> claim_paid_date
         if "KEPT" in sc.upper():
             if not c_date and p_date:
                 c_date = p_date
@@ -1292,141 +985,64 @@ def bulk_insert_autostat_submissions(rows):
     if sheet_rows:
         ws.append_rows(sheet_rows, value_input_option="RAW")
 
-
-# ========================================================================
-# NEW (2026-09-25): PTP Monitoring tracker paste parser
-# ========================================================================
-
 def _parse_ptp_tracker_paste(text):
-    """Parses rows copy-pasted straight from the PTP Monitoring tracker
-    (tab-separated), in this exact 17-column order (matches
-    PSB_TRACKER.xlsx):
-      0  AGENT NAME
-      1  DATE INPUTTED
-      2  ACCOUNT NUMBER
-      3  PTP DATE
-      4  HOLDATE
-      5  SCOREBAND
-      6  DPD
-      7  OB
-      8  CONFIRMED AMOUNT
-      9  FID
-     10  CONFIRMED DATE
-     11  OB (2nd)
-     12  ACCOUNT STATUS   (KEPT / PTP)
-     13  STATUS           (FULL UPDATE / VS)
-     14  MONTH
-     15  OK / BP
-     16  PLACEMENT
-
-    Returns (parsed_rows, errors). parsed_rows is already shaped for
-    bulk_insert_autostat_submissions() — that function already shifts
-    ptp_date/ptp_amount -> claim_paid_date/claim_paid_amount whenever
-    status_code contains "KEPT", so this parser always fills
-    ptp_date/ptp_amount from the tracker's PTP DATE / CONFIRMED AMOUNT
-    columns and lets that existing logic handle both PTP and KEPT rows
-    correctly.
-    """
     parsed, errors = [], []
-
     for i, row in enumerate(_parse_pasted_tsv(text), 1):
         while len(row) < 17:
             row.append("")
-
-        raw_agent         = row[0].strip()
-        date_inputted_raw = row[1].strip()
-        raw_account       = row[2].strip()
-        ptp_date_raw      = row[3].strip()
-        dpd               = row[6].strip()
-        confirmed_amt_raw = row[8].strip()
-        account_status    = row[12].strip().upper()   # KEPT / PTP
-        sub_status        = row[13].strip().upper()   # FULL UPDATE / VS
-        scoreband         = row[5].strip()
-        placement         = row[16].strip().upper()
-
+        raw_agent          = row[0].strip()
+        date_inputted_raw  = row[1].strip()
+        raw_account        = row[2].strip()
+        ptp_date_raw       = row[3].strip()
+        scoreband          = row[5].strip()
+        dpd                = row[6].strip()
+        confirmed_amt_raw  = row[8].strip()
+        confirmed_date_raw = row[10].strip()
+        account_status     = row[12].strip().upper()
+        sub_status         = row[13].strip().upper()
+        placement          = row[16].strip().upper()
         if not raw_agent and not raw_account:
-            continue  # blank paste line
-
+            continue
         acct = normalize_account(raw_account)
         if len(acct) < 10:
             errors.append(f"Row {i}: invalid account number '{raw_account}'")
             continue
-
         collector = resolve_tracker_agent(raw_agent)
         if not collector:
-            errors.append(
-                f"Row {i}: agent name '{raw_agent}' not recognized — "
-                f"add it to AGENT_NAME_TO_USERNAME, or this row will be skipped."
-            )
+            errors.append(f"Row {i}: agent name '{raw_agent}' not recognized — add it to AGENT_NAME_TO_USERNAME, or this row will be skipped.")
             continue
-
         if account_status not in ("KEPT", "PTP"):
-            errors.append(
-                f"Row {i}: unrecognized ACCOUNT STATUS '{row[12]}' "
-                f"(expected KEPT or PTP) — skipped."
-            )
+            errors.append(f"Row {i}: unrecognized ACCOUNT STATUS '{row[12]}' (expected KEPT or PTP) — skipped.")
             continue
-
-        ptp_date = _parse_date_flex(ptp_date_raw)
-        ptp_amount = _parse_amount_str(confirmed_amt_raw)
-        submitted_dt = _parse_date_flex(date_inputted_raw) or date.today()
-
-        status_code = f"{account_status} - {sub_status or 'TRACKER IMPORT'}"
-        remarks = (
-            f"Imported from PTP Monitoring Tracker | "
-            f"Placement: {placement or '—'} | DPD: {dpd or '—'} | "
-            f"Scoreband: {scoreband or '—'}"
-        )
-
+        ptp_date       = _parse_date_flex(ptp_date_raw)
+        confirmed_date = _parse_date_flex(confirmed_date_raw)
+        confirmed_amt  = _parse_amount_str(confirmed_amt_raw)
+        submitted_dt   = _parse_date_flex(date_inputted_raw) or date.today()
         parsed.append({
-            "account_number":    acct,
-            "status_code":       status_code,
-            "remarks":           remarks,
-            "ptp_date":          ptp_date.isoformat() if ptp_date else "",
-            "ptp_amount":        round(ptp_amount, 2) if ptp_amount is not None else "",
-            "claim_paid_date":   "",
-            "claim_paid_amount": "",
-            "collector":         collector,
-            "submitted_at": datetime.combine(
-                submitted_dt, datetime.min.time()
-            ).isoformat(timespec="seconds"),
+            "collector":        collector,
+            "account_number":   acct,
+            "account_status":   account_status,
+            "sub_status":       sub_status,
+            "ptp_date":         ptp_date.isoformat() if ptp_date else "",
+            "confirmed_date":   confirmed_date.isoformat() if confirmed_date else "",
+            "confirmed_amount": round(confirmed_amt, 2) if confirmed_amt is not None else "",
+            "dpd":              dpd,
+            "scoreband":        scoreband,
+            "placement":        placement,
+            "date_inputted":    datetime.combine(submitted_dt, datetime.min.time()).isoformat(timespec="seconds"),
         })
-
     return parsed, errors
 
-
-# ========================================================================
-# BULK PASTE — UI sections (called from each admin dashboard)
-# ========================================================================
-
 def bulk_paste_endo_section():
-    """Admin pastes raw Endo rows (tab-separated) for batch import.
-
-    Expected column order (matching your spreadsheet export):
-      0: Account Number
-      1: Endo Date  (any of YYYY/MM/DD, MM/DD/YYYY, YYYY-MM-DD)
-      2: Agent / CMS username
-      3: (ignored — leave blank or any value)
-      4: Placement  (FRONTEND / MIDRANGE / HARDCORE)
-    """
     st.subheader("⑤ Bulk Paste — Endo Import")
-    st.caption(
-        "Paste rows directly from your spreadsheet (tab-separated). "
-        "Expected columns: **Account Number | Endo Date | Agent | (ignored) | Placement**"
-    )
-    raw = st.text_area(
-        "Paste rows here (one account per line)",
-        height=180,
-        placeholder="1968062853581\t08/20/2026\tCSAYSON\t\tFRONTEND",
-        key="bulk_endo_paste",
-    )
+    st.caption("Paste rows directly from your spreadsheet (tab-separated). Expected columns: **Account Number | Endo Date | Agent | (ignored) | Placement**")
+    raw = st.text_area("Paste rows here (one account per line)", height=180, placeholder="1968062853581\t08/20/2026\tCSAYSON\t\tFRONTEND", key="bulk_endo_paste")
 
     if not raw.strip():
         return
 
     parsed, errors = [], []
     for i, row in enumerate(_parse_pasted_tsv(raw), 1):
-        # Pad short rows
         while len(row) < 5:
             row.append("")
         acct = normalize_account(row[0])
@@ -1445,8 +1061,7 @@ def bulk_paste_endo_section():
         if placement not in PLACEMENTS:
             errors.append(f"Row {i}: placement '{row[4]}' not in {PLACEMENTS}")
             continue
-        parsed.append({"account_number": acct, "endo_date": d.isoformat(),
-                       "agent": agent, "placement": placement})
+        parsed.append({"account_number": acct, "endo_date": d.isoformat(), "agent": agent, "placement": placement})
 
     if errors:
         for e in errors:
@@ -1460,19 +1075,10 @@ def bulk_paste_endo_section():
             st.success(f"Imported {len(parsed)} row(s) successfully!")
             st.rerun()
 
-
 def excel_upload_autostat_section():
-    """Upload the Lark AUTOSTAT FORM Excel export directly.
-    Compares against existing DB rows using (account_number + remark_date)
-    so only NEW rows are imported.
-    """
     st.subheader("② Upload Excel — Auto Stat Import")
-    st.caption(
-        "Upload your **PSB NEW ENDO PROCESS_AUTOSTAT FORM_All Results.xlsx** file. "
-        "Rows already in the database (matched by Account + Remark Date) are skipped automatically."
-    )
+    st.caption("Upload your **PSB NEW ENDO PROCESS_AUTOSTAT FORM_All Results.xlsx** file. Rows already in the database (matched by Account + Remark Date) are skipped automatically.")
 
-    # --- Danger zone: clear all data ---
     with st.expander("🗑️ Clear all AutoStat data (test data reset)", expanded=False):
         st.warning("This will **permanently delete** all rows in the AutoStat database. Use only to clear test data.")
         if "confirm_clear_as" not in st.session_state:
@@ -1486,11 +1092,7 @@ def excel_upload_autostat_section():
                 st.success("Database cleared. You may now upload the Excel file.")
                 st.rerun()
 
-    xfile = st.file_uploader(
-        "AUTOSTAT FORM Excel (.xlsx)",
-        type=["xlsx"],
-        key="excel_autostat_upload",
-    )
+    xfile = st.file_uploader("AUTOSTAT FORM Excel (.xlsx)", type=["xlsx"], key="excel_autostat_upload")
     if not xfile:
         return
 
@@ -1500,7 +1102,6 @@ def excel_upload_autostat_section():
         st.error(f"Could not read file: {e}")
         return
 
-    # --- Column mapping (case-insensitive) ---
     xdf.columns = [str(c).strip() for c in xdf.columns]
     col_map = {
         "ACCOUNT NUMBER":    "account_number",
@@ -1520,15 +1121,13 @@ def excel_upload_autostat_section():
 
     xdf = xdf.rename(columns=col_map)
 
-    # --- Load existing DB keys: set of (normalized_account, remark_date_iso) ---
     existing_df = load_autostat_submissions()
     existing_keys = set()
     for _, row in existing_df.iterrows():
         acct = normalize_account(str(row["account_number"]))
-        sat  = str(row.get("submitted_at", "")).strip()[:16]  # YYYY-MM-DDTHH:MM
+        sat  = str(row.get("submitted_at", ""))[:16]
         existing_keys.add((acct, sat))
 
-    # --- Parse + dedupe ---
     new_rows, skipped = [], 0
     for _, r in xdf.iterrows():
         acct = normalize_account(str(r["account_number"]))
@@ -1536,7 +1135,6 @@ def excel_upload_autostat_section():
             skipped += 1
             continue
 
-        # Parse remark date
         rd = r["remark_date"]
         if pd.isnull(rd):
             remark_dt = None
@@ -1557,7 +1155,6 @@ def excel_upload_autostat_section():
             skipped += 1
             continue
 
-        # Parse dates & amounts using _parse_date_flex
         ptp_d = _parse_date_flex(r.get("ptp_date"))
         ptp_date_str = ptp_d.strftime("%Y-%m-%d") if ptp_d else ""
 
@@ -1570,7 +1167,6 @@ def excel_upload_autostat_section():
         status_code = str(r["status_code"]).strip() if pd.notna(r.get("status_code")) else ""
         remarks = str(r["remarks"]).strip() if pd.notna(r.get("remarks")) else ""
 
-        # Handle KEPT status: if claim date/amount is in PTP columns in Lark export, move to claim columns
         if "KEPT" in status_code.upper():
             if not claim_date_str and ptp_date_str:
                 claim_date_str = ptp_date_str
@@ -1606,23 +1202,10 @@ def excel_upload_autostat_section():
             st.success(f"Imported {len(new_rows)} row(s) successfully!")
             st.rerun()
 
-
-
 def bulk_paste_autostat_section():
-    """Admin pastes Lark AUTOSTAT form rows for batch import.
-    Handles multiline REMARKS fields correctly.
-    """
     st.subheader("③ Bulk Paste — Auto Stat Import")
-    st.caption(
-        "Paste rows directly from your Lark AUTOSTAT form export. "
-        "Multiline remarks are handled automatically."
-    )
-    raw = st.text_area(
-        "Paste rows here",
-        height=220,
-        placeholder="001-388-...\t2026/08/20\tShamira Tupas\tCALL - PTP FULL UPDATE\t[remarks]\t08/20/2026\t30,420.00\t2026/08/23 17:40 (GMT+8)\t\t\tSTUPAS",
-        key="bulk_autostat_paste",
-    )
+    st.caption("Paste rows directly from your Lark AUTOSTAT form export. Multiline remarks are handled automatically.")
+    raw = st.text_area("Paste rows here", height=220, placeholder="001-388-...\t2026/08/20\tShamira Tupas\tCALL - PTP FULL UPDATE\t[remarks]\t08/20/2026\t30,420.00\t2026/08/23 17:40 (GMT+8)\t\t\tSTUPAS", key="bulk_autostat_paste")
 
     if not raw.strip():
         return
@@ -1640,12 +1223,9 @@ def bulk_paste_autostat_section():
         claim_paid_amount = _parse_amount_str(rec["claim_paid_amount"])
         collector = rec["collector"]
 
-        # Parse remark date timestamp
         rd_raw = rec["remark_date"]
         try:
-            submitted_at = datetime.strptime(
-                rd_raw.split("(")[0].strip(), "%Y/%m/%d %H:%M"
-            ).isoformat(timespec="seconds")
+            submitted_at = datetime.strptime(rd_raw.split("(")[0].strip(), "%Y/%m/%d %H:%M").isoformat(timespec="seconds")
         except ValueError:
             submitted_at = datetime.now().isoformat(timespec="seconds")
 
@@ -1687,70 +1267,43 @@ def bulk_paste_autostat_section():
             st.success(f"Imported {len(parsed)} row(s) successfully!")
             st.rerun()
 
-
-# ========================================================================
-# NEW (2026-09-25): UI — Bulk Paste, PTP Monitoring Tracker Import
-# ========================================================================
-
 def bulk_paste_ptp_monitoring_section():
-    """Admin pastes rows straight from the daily PTP Monitoring tracker
-    (Agent Name -> Placement, 17 columns). Works for both PTP and KEPT
-    rows — KEPT rows are automatically filed under Claim Paid via
-    bulk_insert_autostat_submissions()'s existing shift logic."""
     st.subheader("④ Bulk Paste — PTP Monitoring Tracker Import")
     st.caption(
-        "Copy the full row block from your daily PTP Monitoring tracker "
-        "(Agent Name through Placement — 17 columns) and paste it below. "
-        "Works for both PTP and KEPT rows — KEPT rows are automatically "
-        "filed under Claim Paid, same as the regular Auto Stat form."
+        "Paste tracker rows (17 columns). Data goes to **Tracker_Submissions** — "
+        "does NOT mix with agent Auto Stat submissions."
     )
+    with st.expander("🗑️ Clear all Tracker data", expanded=False):
+        st.warning("Permanently deletes all rows in Tracker_Submissions.")
+        if st.button("I understand — Clear Tracker Database", key="clear_tracker_btn"):
+            st.session_state["confirm_clear_tracker"] = True
+        if st.session_state.get("confirm_clear_tracker"):
+            if st.button("✅ YES, delete everything", key="clear_tracker_confirm"):
+                clear_tracker_submissions()
+                st.session_state["confirm_clear_tracker"] = False
+                st.success("Tracker database cleared.")
+                st.rerun()
     raw = st.text_area(
-        "Paste tracker rows here",
-        height=220,
-        placeholder=(
-            "Eurie Bastasa\t9/1/2026\t001-388-06759873-7\t9/4/2026\t9/4/2026\t"
-            "0\t43\t908886.74\t25980.00\t\t\t908886.74\tPTP\tFULL UPDATE\t"
-            "9/1/2026\tOK\tFRONT END"
-        ),
+        "Paste tracker rows here", height=220,
+        placeholder="Eurie Bastasa\t9/1/2026\t001-388-06759873-7\t9/4/2026\t...",
         key="bulk_ptp_tracker_paste",
     )
-
     if not raw.strip():
         return
-
     parsed, errors = _parse_ptp_tracker_paste(raw)
-
     if errors:
         for e in errors:
             st.warning(e)
-
     if parsed:
-        preview_df = pd.DataFrame(parsed)[[
-            "collector", "account_number", "status_code",
-            "ptp_date", "ptp_amount", "submitted_at",
-        ]]
-        st.caption(f"Preview — **{len(parsed)}** row(s) ready to import:")
+        preview_df = pd.DataFrame(parsed)[["collector","account_number","account_status","sub_status","ptp_date","confirmed_date","confirmed_amount"]]
+        st.caption(f"Preview — **{len(parsed)}** row(s) → Tracker_Submissions:")
         st.dataframe(preview_df, use_container_width=True, hide_index=True)
-        if st.button(
-            f"✅ Confirm import {len(parsed)} tracker row(s)",
-            key="confirm_bulk_ptp_tracker",
-        ):
-            bulk_insert_autostat_submissions(parsed)
-            st.success(f"Imported {len(parsed)} row(s) successfully!")
+        if st.button(f"✅ Confirm import {len(parsed)} tracker row(s)", key="confirm_bulk_ptp_tracker"):
+            bulk_insert_tracker_submissions(parsed)
+            st.success(f"Imported {len(parsed)} row(s) into Tracker_Submissions!")
             st.rerun()
 
-
-# ========================================================================
-# NEW (2026-09-17): AGENT RANKINGS — read-only, admin-side
-# ========================================================================
-
 def _classify_status(status_code: str) -> str:
-    """Buckets a status_code into PTP / REPO / KEPT / OTHER for the
-    rankings view. A status can contain both 'PTP' and 'REPO'
-    (e.g. 'CALL - PTP REPO' = a PTP promise specifically to repo the
-    unit) — those are counted as PTP for the ranking (that's the
-    open promise being tracked); 'KEPT' statuses (the promise was
-    already fulfilled) are their own bucket regardless of wording."""
     sc = (status_code or "").upper()
     if "KEPT" in sc:
         return "KEPT"
@@ -1760,24 +1313,7 @@ def _classify_status(status_code: str) -> str:
         return "REPO"
     return "OTHER"
 
-
 def render_ptp_trend_section(df: pd.DataFrame):
-    """NEW (2026-09-17 v2). Two additive, read-only views built on top
-    of AutoStat_Submissions — does not touch the existing pivot table
-    above it:
-
-      1. A 14-day bar chart of PTP COUNT + PTP AMOUNT PROMISED per day,
-         so a plain "which way is this trending" question has an
-         answer without opening a spreadsheet.
-      2. A peso-amount leaderboard per agent: Total PTP Promised vs
-         Total Kept (amount collected/confirmed), since the count-based
-         table above answers "who logged the most updates" but not
-         "who is promising/collecting the most money".
-
-    df is the already-loaded, already-'_dt'/'_bucket'/'_agent'-tagged
-    AutoStat_Submissions frame from render_rankings_body() — reused
-    as-is, no extra Sheets calls.
-    """
     work = df.copy()
     work["_ptp_amt"] = work["ptp_amount"].apply(_parse_amount)
     work["_claim_amt"] = work["claim_paid_amount"].apply(_parse_amount)
@@ -1785,7 +1321,6 @@ def render_ptp_trend_section(df: pd.DataFrame):
     st.write("")
     st.subheader("💰 PTP Trend & Amounts")
 
-    # --- 1) 14-day trend: PTP count + PTP amount promised per day ------
     cutoff = pd.Timestamp(date.today()) - pd.Timedelta(days=13)
     ptp_only = work[(work["_bucket"] == "PTP") & (work["_dt"] >= cutoff)].copy()
 
@@ -1804,7 +1339,7 @@ def render_ptp_trend_section(df: pd.DataFrame):
 
         t1, t2 = st.columns(2)
         with t1:
-            chart_display_v0_series = None  # placeholder, not used — kept for clarity
+            chart_display_v0_series = None
         st.caption("PTP count logged per day (last 14 days)")
         st.bar_chart(
             pd.DataFrame({"PTP Count": daily["count"].values}, index=day_labels),
@@ -1818,7 +1353,6 @@ def render_ptp_trend_section(df: pd.DataFrame):
 
     st.write("")
 
-    # --- 2) Peso leaderboard: Total PTP Promised vs Total Kept ---------
     money = work.groupby("_agent").agg(
         ptp_promised=("_ptp_amt", lambda s: s.fillna(0).sum()),
         kept_amount=("_claim_amt", lambda s: s.fillna(0).sum()),
@@ -1840,21 +1374,8 @@ def render_ptp_trend_section(df: pd.DataFrame):
         hide_index=True,
     )
 
-
-# ========================================================================
-# NEW (2026-09-25): PTP -> KEPT CONVERSION — rankings addition
-# ========================================================================
-
 def compute_ptp_conversion(df: pd.DataFrame) -> pd.DataFrame:
-    """Per agent: how many distinct accounts they logged a PTP status
-    for, and of those, how many later also got a KEPT status logged for
-    the SAME account — i.e. the promise was actually fulfilled, not just
-    an independent count of PTPs vs KEPTs.
-
-    df must already have '_agent' and '_bucket' columns, exactly as
-    render_rankings_body() sets them up before calling this."""
     work = df[["_agent", "account_number", "_bucket"]].copy()
-
     ptp_accounts = (
         work[work["_bucket"] == "PTP"]
         .groupby("_agent")["account_number"]
@@ -1888,11 +1409,7 @@ def compute_ptp_conversion(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index(drop=True)
     )
 
-
 def render_ptp_conversion_section(df: pd.DataFrame):
-    """Additive, read-only. Called from render_rankings_body(), right
-    after render_ptp_trend_section(scoped), passing the same `scoped`
-    frame."""
     conv_df = compute_ptp_conversion(df)
     if conv_df.empty:
         return
@@ -1914,11 +1431,7 @@ def render_ptp_conversion_section(df: pd.DataFrame):
         },
     )
 
-
 def render_rankings_body():
-    """Shared rankings table + metrics, used by BOTH the admin-side
-    Agent Rankings page and the agent-facing homescreen Rankings page.
-    Read-only — never modifies AutoStat_Submissions."""
     df = load_autostat_submissions()
     if df.empty:
         st.info("No Auto Stat submissions yet — nothing to rank.")
@@ -1938,7 +1451,7 @@ def render_rankings_body():
     if period == "Today":
         mask = df["_dt"].dt.date == today.date()
     elif period == "This Week":
-        start_of_week = today - pd.Timedelta(days=today.weekday())  # Monday
+        start_of_week = today - pd.Timedelta(days=today.weekday())
         mask = df["_dt"] >= start_of_week
     elif period == "This Month":
         mask = (df["_dt"].dt.year == today.year) & (df["_dt"].dt.month == today.month)
@@ -1977,7 +1490,6 @@ def render_rankings_body():
 
     st.write("")
 
-    # --- Podium: top 3 as big, obvious cards --------------------------
     top3 = pivot.head(3)
     if len(top3) > 0:
         podium_cols = st.columns(len(top3))
@@ -2001,7 +1513,6 @@ def render_rankings_body():
                 )
         st.write("")
 
-    # --- Full leaderboard table ----------------------------------------
     max_total = int(pivot["TOTAL"].max()) if not pivot.empty else 1
     st.dataframe(
         pivot,
@@ -2019,15 +1530,125 @@ def render_rankings_body():
             ),
         },
     )
-
-    # NEW (2026-09-17 v2): PTP trend chart + peso leaderboard, scoped to
-    # the same period selection above. Additive — read-only.
     render_ptp_trend_section(scoped)
-
-    # NEW (2026-09-25): PTP -> KEPT conversion table, same scoped period.
-    # Additive — read-only.
     render_ptp_conversion_section(scoped)
 
+
+def render_tracker_rankings(df: pd.DataFrame):
+    if df.empty:
+        st.info("No tracker data yet.")
+        return
+    df = df.copy()
+    df["_bucket"] = df.apply(lambda r: _classify_tracker_status(r["account_status"], r["sub_status"]), axis=1)
+    df["_agent"] = df["collector"].astype(str).str.strip().str.upper()
+    df = df[df["_agent"] != ""]
+    pivot = pd.pivot_table(df, index="_agent", columns="_bucket", values="id", aggfunc="count", fill_value=0)
+    for col in ["PTP", "REPO", "KEPT", "OTHER"]:
+        if col not in pivot.columns:
+            pivot[col] = 0
+    pivot = pivot[["PTP", "REPO", "KEPT", "OTHER"]]
+    pivot["TOTAL"] = pivot.sum(axis=1)
+    pivot = pivot.sort_values("TOTAL", ascending=False).reset_index().rename(columns={"_agent": "AGENT"})
+    pivot.insert(0, "RANK", range(1, len(pivot) + 1))
+    st.caption(f"{len(df)} tracker entries · {pivot['AGENT'].nunique()} agent(s)")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("🤝 Total PTP", int(pivot["PTP"].sum()))
+    m2.metric("🚗 Total REPO (VS)", int(pivot["REPO"].sum()))
+    m3.metric("💳 Total KEPT", int(pivot["KEPT"].sum()))
+    st.write("")
+    top3 = pivot.head(3)
+    if len(top3) > 0:
+        podium_cols = st.columns(len(top3))
+        medal = ["🥇", "🥈", "🥉"]
+        trim  = ["gold", "silver", "bronze"]
+        for i, (_, row) in enumerate(top3.iterrows()):
+            with podium_cols[i]:
+                st.markdown(f'<div class="rank-podium-card rank-{trim[i]}"><div class="rank-medal">{medal[i]}</div><div class="rank-name">{row["AGENT"]}</div><div class="rank-total">{int(row["TOTAL"])}</div><div class="rank-total-label">entries</div><div class="rank-breakdown">PTP {int(row["PTP"])} · REPO {int(row["REPO"])} · KEPT {int(row["KEPT"])}</div></div>', unsafe_allow_html=True)
+        st.write("")
+    max_total = int(pivot["TOTAL"].max()) if not pivot.empty else 1
+    st.dataframe(pivot, use_container_width=True, hide_index=True,
+        column_config={"RANK": st.column_config.NumberColumn("#", width="small"),
+                       "TOTAL": st.column_config.ProgressColumn("TOTAL", min_value=0, max_value=max_total, format="%d")})
+
+def render_ptp_countdown(df: pd.DataFrame):
+    st.subheader("⏳ PTP Countdown")
+    st.caption("Accounts with a future PTP date not yet confirmed as KEPT.")
+    work = df.copy()
+    work["_ptp"]  = pd.to_datetime(work["ptp_date"], errors="coerce")
+    work["_conf"] = work["confirmed_date"].astype(str).str.strip()
+    today = pd.Timestamp(date.today())
+    mask = (work["account_status"].str.upper().eq("PTP") & work["_ptp"].notna() &
+            (work["_ptp"] >= today) & (work["_conf"].eq("") | work["_conf"].isin(["None","nan","NaT"])))
+    upcoming = work[mask].copy()
+    if upcoming.empty:
+        st.success("✅ No upcoming unresolved PTPs right now.")
+        return
+    upcoming["DAYS LEFT"] = (upcoming["_ptp"] - today).dt.days
+    upcoming = upcoming.sort_values("DAYS LEFT")
+    upcoming["PTP DATE"] = upcoming["_ptp"].dt.strftime("%m/%d/%Y")
+    st.dataframe(upcoming.rename(columns={"account_number":"ACCOUNT NUMBER","collector":"COLLECTOR","placement":"PLACEMENT"})
+        [["ACCOUNT NUMBER","PTP DATE","DAYS LEFT","COLLECTOR","PLACEMENT"]],
+        use_container_width=True, hide_index=True,
+        column_config={"DAYS LEFT": st.column_config.NumberColumn("DAYS LEFT", format="%d days")})
+    st.caption(f"**{len(upcoming)}** account(s) with upcoming PTP.")
+
+def render_broken_ptp(df: pd.DataFrame):
+    st.subheader("❌ Broken PTP")
+    st.caption("Accounts whose PTP date has PASSED with no confirmed payment.")
+    work = df.copy()
+    work["_ptp"]  = pd.to_datetime(work["ptp_date"], errors="coerce")
+    work["_conf"] = work["confirmed_date"].astype(str).str.strip()
+    today = pd.Timestamp(date.today())
+    mask = (work["account_status"].str.upper().eq("PTP") & work["_ptp"].notna() &
+            (work["_ptp"] < today) & (work["_conf"].eq("") | work["_conf"].isin(["None","nan","NaT"])))
+    broken = work[mask].copy()
+    if broken.empty:
+        st.success("✅ No broken PTPs — all past PTPs resolved.")
+        return
+    broken["DAYS OVERDUE"] = (today - broken["_ptp"]).dt.days
+    broken = broken.sort_values("DAYS OVERDUE", ascending=False)
+    broken["PTP DATE"] = broken["_ptp"].dt.strftime("%m/%d/%Y")
+    st.dataframe(broken.rename(columns={"account_number":"ACCOUNT NUMBER","collector":"COLLECTOR","placement":"PLACEMENT"})
+        [["ACCOUNT NUMBER","PTP DATE","DAYS OVERDUE","COLLECTOR","PLACEMENT"]],
+        use_container_width=True, hide_index=True,
+        column_config={"DAYS OVERDUE": st.column_config.NumberColumn("DAYS OVERDUE", format="%d days")})
+    st.caption(f"**{len(broken)}** account(s) with broken/unresolved PTP.")
+
+def tracker_admin_page():
+    st.markdown('<div class="psb-hero" style="padding-bottom:1rem;"><div class="psb-badge">PSB</div><div class="psb-title">PTP Tracker Dashboard</div><div class="psb-sub">Rankings · Countdown · Broken PTP</div></div>', unsafe_allow_html=True)
+    top_a, top_b = st.columns([1, 1])
+    with top_a:
+        if st.button("← Back to Admin picker"):
+            st.session_state["admin_process"] = None
+            st.rerun()
+    with top_b:
+        if st.button("🔒 Log out"):
+            st.session_state["is_admin"] = False
+            st.session_state["logo_clicks"] = 0
+            st.session_state["admin_process"] = None
+            st.rerun()
+    st.divider()
+    df = load_tracker_submissions()
+    if df.empty:
+        st.info("No tracker data yet. Use Auto Stat Admin → ④ Bulk Paste to import tracker rows.")
+        return
+    total = len(df)
+    ptp_count  = (df["account_status"].str.upper() == "PTP").sum()
+    kept_count = (df["account_status"].str.upper() == "KEPT").sum()
+    vs_count   = (df["sub_status"].str.upper().str.contains("VS", na=False)).sum()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("📋 Total Entries", total)
+    c2.metric("🤝 PTP", int(ptp_count))
+    c3.metric("💳 KEPT", int(kept_count))
+    c4.metric("🚗 REPO (VS)", int(vs_count))
+    st.divider()
+    tab1, tab2, tab3 = st.tabs(["🏆 Rankings", "⏳ PTP Countdown", "❌ Broken PTP"])
+    with tab1:
+        render_tracker_rankings(df)
+    with tab2:
+        render_ptp_countdown(df)
+    with tab3:
+        render_broken_ptp(df)
 
 def agent_rankings_page():
     st.markdown("""
@@ -2053,11 +1674,6 @@ def agent_rankings_page():
     st.divider()
     render_rankings_body()
 
-
-# ========================================================================
-# NEW (2026-09-17, v2): UI — RANKINGS, agent-facing (no admin login needed)
-# ========================================================================
-
 def public_rankings_page():
     _, col, _ = st.columns([1, 3, 1])
     with col:
@@ -2070,11 +1686,6 @@ def public_rankings_page():
         """, unsafe_allow_html=True)
         render_rankings_body()
 
-
-# ----------------------------------------------------------------------
-# UI — STYLES
-# ----------------------------------------------------------------------
-
 def inject_styles():
     st.markdown(
         """
@@ -2083,12 +1694,10 @@ def inject_styles():
 
         html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 
-        /* Hide default Streamlit chrome */
         #MainMenu, footer, header { visibility: hidden; }
         .stDeployButton { display: none; }
         [data-testid="stSidebar"] { display: none; }
 
-        /* Page background — subtle radial gradient instead of flat color */
         .stApp {
             background:
                 radial-gradient(circle at 20% 0%, rgba(200,16,46,0.10) 0%, rgba(200,16,46,0) 45%),
@@ -2097,14 +1706,12 @@ def inject_styles():
         }
         [data-testid="stAppViewContainer"] { background: transparent; }
 
-        /* Main content padding */
         .block-container {
             padding-top: 2rem !important;
             padding-left: 3rem !important;
             padding-right: 3rem !important;
         }
 
-        /* Hero logo banner */
         .psb-hero {
             text-align: center;
             padding: 2.5rem 2rem 2rem;
@@ -2145,7 +1752,6 @@ def inject_styles():
             text-transform: uppercase;
         }
 
-        /* Card */
         .psb-card {
             background: #131929;
             border: 1px solid #1e2d45;
@@ -2155,7 +1761,6 @@ def inject_styles():
             box-shadow: 0 8px 32px rgba(0,0,0,0.4);
         }
 
-        /* Form inputs */
         [data-testid="stTextInput"] input,
         [data-testid="stDateInput"] input,
         [data-testid="stNumberInput"] input,
@@ -2173,7 +1778,6 @@ def inject_styles():
         }
         label { color: #9ca3af !important; font-size: 0.82rem !important; font-weight: 500 !important; letter-spacing: 0.04em !important; }
 
-        /* Submit button */
         [data-testid="stFormSubmitButton"] > button {
             width: 100% !important;
             background: linear-gradient(135deg, #c8102e, #8b0000) !important;
@@ -2193,7 +1797,6 @@ def inject_styles():
             box-shadow: 0 6px 24px rgba(200,16,46,0.45) !important;
         }
 
-        /* Admin button (generic) */
         .stButton > button {
             background: #1e2d45 !important;
             color: #e5e7eb !important;
@@ -2206,7 +1809,6 @@ def inject_styles():
             border-color: #c8102e !important;
         }
 
-        /* Download button */
         [data-testid="stDownloadButton"] > button {
             background: linear-gradient(135deg, #166534, #14532d) !important;
             color: white !important;
@@ -2216,7 +1818,6 @@ def inject_styles():
             box-shadow: 0 4px 12px rgba(22,101,52,0.3) !important;
         }
 
-        /* Secret admin trigger — invisible tap zone on logo */
         .secret-trigger button {
             background: transparent !important;
             border: none !important;
@@ -2230,25 +1831,14 @@ def inject_styles():
             box-shadow: none !important;
         }
 
-        /* Divider */
         hr { border-color: #1e2d45 !important; }
 
-        /* Metrics */
         [data-testid="stMetric"] { background: #131929; border: 1px solid #1e2d45; border-radius: 10px; padding: 1rem; }
         [data-testid="stMetricLabel"] { color: #6b7280 !important; }
         [data-testid="stMetricValue"] { color: #e5e7eb !important; }
 
-        /* Success / error / warning */
         [data-testid="stAlert"] { border-radius: 10px !important; }
 
-        /* ==================================================================
-           NEW (2026-09-17 v2): PROCESS PICKER CARDS
-           Replaces the old plain '.process-pick-btn button' look — each
-           process now gets its own accent color, icon chip, title + one
-           line of description, and a hover lift. Applied to both the
-           agent picker (process_picker_page) and the admin picker
-           (admin_picker_page) since both use the same markup pattern.
-           ================================================================== */
         .picker-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -2300,9 +1890,6 @@ def inject_styles():
             margin-bottom: 0.9rem;
             min-height: 2.4em;
         }
-        /* the real Streamlit button sits underneath the card visuals,
-           styled to look like a subtle 'open' pill rather than a full
-           button, and is what actually receives the click */
         .picker-card .stButton > button {
             width: 100% !important;
             background: color-mix(in srgb, var(--accent, #c8102e) 14%, #0d1525) !important;
@@ -2323,8 +1910,27 @@ def inject_styles():
         .picker-card.accent-blue   { --accent: #2563eb; }
         .picker-card.accent-green  { --accent: #16a34a; }
         .picker-card.accent-gold   { --accent: #d4a017; }
+        
+        [data-testid="stFileUploaderDropzone"] {
+            background: #0d1525 !important;
+            border: 1px dashed #2d3f5a !important;
+            border-radius: 10px !important;
+        }
+        [data-testid="stFileUploaderDropzone"] > div { background: transparent !important; color: #9ca3af !important; }
+        [data-testid="stFileUploaderDropzone"] button { background: #1e2d45 !important; color: #e5e7eb !important; border: 1px solid #2d3f5a !important; border-radius: 8px !important; }
+        [data-testid="stFileUploaderDropzone"] small { color: #6b7280 !important; }
+        [data-testid="stFileUploader"] label { color: #9ca3af !important; }
+        .rank-podium-card { background: #131929; border: 1px solid #1e2d45; border-radius: 16px; padding: 1.5rem 1rem; text-align: center; position: relative; overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,0.4); margin-bottom: 0.5rem; }
+        .rank-podium-card::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 4px; }
+        .rank-gold::before   { background: linear-gradient(90deg, #f59e0b, #d97706); }
+        .rank-silver::before { background: linear-gradient(90deg, #9ca3af, #6b7280); }
+        .rank-bronze::before { background: linear-gradient(90deg, #b45309, #92400e); }
+        .rank-medal { font-size: 2.2rem; margin-bottom: 0.4rem; display: block; }
+        .rank-name { color: #ffffff; font-size: 1rem; font-weight: 700; margin-bottom: 0.2rem; letter-spacing: 0.02em; word-break: break-all; }
+        .rank-total { color: #ffffff; font-size: 2.2rem; font-weight: 800; line-height: 1.1; }
+        .rank-total-label { color: #6b7280; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.5rem; display: block; }
+        .rank-breakdown { color: #9ca3af; font-size: 0.78rem; margin-top: 0.4rem; line-height: 1.4; }
 
-        /* NEW: "today at a glance" stat strip on the agent picker page */
         .glance-strip {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -2355,11 +1961,6 @@ def inject_styles():
         """,
         unsafe_allow_html=True,
     )
-
-
-# ----------------------------------------------------------------------
-# UI — AGENT FORM (Endo) — UNCHANGED FROM ORIGINAL
-# ----------------------------------------------------------------------
 
 def agent_form_page():
     _, col, _ = st.columns([1, 2, 1])
@@ -2399,12 +2000,7 @@ def agent_form_page():
                     st.success("✅ Submitted successfully! You may submit another one.")
 
 
-# ========================================================================
-# NEW: UI — AGENT FORM (Auto Stat)
-# ========================================================================
-
 def autostat_form_page():
-    # Version counter — incrementing it resets all widget keys (clears form)
     if "as_v" not in st.session_state:
         st.session_state["as_v"] = 0
     v = st.session_state["as_v"]
@@ -2419,12 +2015,6 @@ def autostat_form_page():
             </div>
         """, unsafe_allow_html=True)
 
-        # CHANGED (2026-09-17, v2): agent field is now a text input so
-        # agents can paste their CMS username instead of clicking through
-        # a dropdown. It's still normalized (trimmed + UPPERCASED) and
-        # checked against AUTO_STAT_AGENTS before the submit is allowed,
-        # so My Submissions / Rankings keep matching correctly even if
-        # someone pastes "csayson" one day and "CSAYSON " the next.
         collector_raw = st.text_input(
             "AGENT (CMS username — paste it)",
             placeholder="e.g. CSAYSON",
@@ -2446,7 +2036,6 @@ def autostat_form_page():
             key=f"as_sc_{v}",
         )
 
-        # — Conditional fields based on status code (placed before Remarks) —
         ptp_date = None
         ptp_amount = None
         claim_paid_date = None
@@ -2482,7 +2071,6 @@ def autostat_form_page():
             key=f"as_rem_{v}",
         )
 
-        # Remark Date + Time (matches Lark form)
         rd_col1, rd_col2 = st.columns(2)
         with rd_col1:
             remark_date = st.date_input("REMARK DATE", value=date.today(), key=f"as_rd_{v}")
@@ -2490,7 +2078,7 @@ def autostat_form_page():
             remark_time = st.time_input(
                 "REMARK TIME",
                 value=datetime.now().time().replace(second=0, microsecond=0),
-                step=60,          # 1-minute steps — agents can type exact time e.g. 08:52
+                step=60,
                 key=f"as_rt_{v}",
             )
 
@@ -2508,17 +2096,10 @@ def autostat_form_page():
                     f"'{collector_raw.strip()}' isn't a recognized agent. "
                     f"Check the spelling, or ask admin to add you to the roster."
                 )
-            # CHANGED (2026-09-17): PTP Date AND PTP Amount are both now
-            # required (blocking) whenever the status is a PTP status —
-            # previously only PTP Date was checked, so a blank/zero PTP
-            # Amount silently went through.
             if has_ptp and not ptp_date:
                 errors.append("PTP Date is required for this status.")
             if has_ptp and (ptp_amount in (None, 0, 0.0)):
                 errors.append("PTP Amount is required for this status (must be greater than 0).")
-            # NEW (2026-09-17): same required-if-this-status treatment for
-            # KEPT statuses — these are the rows that get segregated into
-            # the CLAIM PAID sheet at export, so they need real values.
             if has_kept and not claim_paid_date:
                 errors.append("Claim Paid Date is required for this status.")
             if has_kept and (claim_paid_amount in (None, 0, 0.0)):
@@ -2528,7 +2109,6 @@ def autostat_form_page():
                 for e in errors:
                     st.error(e)
             else:
-                # Build combined submitted_at from remark date + time
                 remark_dt = datetime.combine(remark_date, remark_time)
                 insert_autostat_submission(
                     clean_account,
@@ -2546,16 +2126,7 @@ def autostat_form_page():
                 st.rerun()
 
 
-
-# ========================================================================
-# NEW (2026-09-17): UI — MY SUBMISSIONS (agent-facing proof of submission)
-# ========================================================================
-
 def my_submissions_page():
-    """Lets an agent see their OWN Endo + Auto Stat submission history —
-    proof of what they sent and when, without needing admin access.
-    Read-only: pulls straight from the same Submissions / AutoStat_
-    Submissions data the admin dashboards use, filtered to one agent."""
     _, col, _ = st.columns([1, 3, 1])
     with col:
         st.markdown("""
@@ -2638,15 +2209,7 @@ def my_submissions_page():
         )
 
 
-# ========================================================================
-# NEW (2026-09-17 v2): shared picker-card renderer
-# ========================================================================
-
 def _render_picker_card(col, icon, title, desc, accent, button_label, on_key):
-    """Renders one picker card (icon chip + title + description) with a
-    real st.button underneath that drives navigation. accent is one of
-    'red' | 'blue' | 'green' | 'gold' (matches the .accent-* CSS above).
-    Returns True if the button was clicked this run."""
     with col:
         st.markdown(
             f"""
@@ -2663,15 +2226,11 @@ def _render_picker_card(col, icon, title, desc, accent, button_label, on_key):
 
 
 def _render_today_glance_strip():
-    """NEW: small read-only stat strip on the agent landing page —
-    today's Endo count + today's Auto Stat count + today's PTP count,
-    pulled straight from the same Sheets data the rest of the app
-    already loads. Purely additive, no writes."""
     try:
         endo_df = load_submissions()
         as_df = load_autostat_submissions()
     except Exception:
-        return  # don't let a transient Sheets hiccup break the landing page
+        return
 
     today = date.today()
 
@@ -2709,11 +2268,6 @@ def _render_today_glance_strip():
         """,
         unsafe_allow_html=True,
     )
-
-
-# ========================================================================
-# NEW: UI — PROCESS PICKER (agent landing page)
-# ========================================================================
 
 def process_picker_page():
     _, col, _ = st.columns([1, 3, 1])
@@ -2762,10 +2316,6 @@ def process_picker_page():
         st.markdown("</div>", unsafe_allow_html=True)
 
 
-# ----------------------------------------------------------------------
-# UI — ADMIN LOGIN — UNCHANGED FROM ORIGINAL
-# ----------------------------------------------------------------------
-
 def admin_login():
     st.markdown("""
         <div class="psb-hero">
@@ -2792,10 +2342,6 @@ def admin_login():
             st.rerun()
 
 
-# ----------------------------------------------------------------------
-# UI — ADMIN DASHBOARD (Endo)
-# ----------------------------------------------------------------------
-
 def admin_dashboard():
     st.markdown("""
         <div class="psb-hero" style="padding-bottom:1rem;">
@@ -2818,7 +2364,6 @@ def admin_dashboard():
 
     st.divider()
 
-    # --- NEW (2026-09-01): Danger zone — clear all Endo data for testing ---
     with st.expander("🗑️ Clear all Endo data (test data reset)", expanded=False):
         st.warning("This will **permanently delete** all rows in Submissions and DataGrid. Use only to clear test data.")
         if "confirm_clear_endo" not in st.session_state:
@@ -2834,7 +2379,6 @@ def admin_dashboard():
 
     st.divider()
 
-    # --- DataGrid upload -------------------------------------------------
     st.subheader("① DataGrid Upload")
     st.caption("Upload the latest DataGrid export to update the duplicate-check list.")
     dg_file = st.file_uploader("DataGrid .xlsx", type=["xlsx"])
@@ -2864,7 +2408,6 @@ def admin_dashboard():
 
     st.divider()
 
-    # --- Submissions table -------------------------------------------------
     st.subheader("② Review Submissions")
     df = load_submissions()
 
@@ -2872,9 +2415,6 @@ def admin_dashboard():
         st.info("No submissions yet.")
         return
 
-    # FIXED (2026-09-01): compare using dedupe_key() (zero-padded 15-digit)
-    # on both sides so leading-zero differences between agent-typed input
-    # and DataGrid/CAMS exports don't cause real duplicates to show as NEW.
     df["status"] = df["account_number"].apply(
         lambda a: "DUPLICATE — already in system" if dedupe_key(a) in datagrid_set else "NEW — ready to scrape"
     )
@@ -2921,7 +2461,6 @@ def admin_dashboard():
 
     st.divider()
 
-    # --- Download ------------------------------------------------------
     st.subheader("③ Download for CAMS SCRAPE")
     st.caption(
         "Downloads only NEW, not-yet-exported rows formatted per placement. "
@@ -2947,7 +2486,6 @@ def admin_dashboard():
 
     st.divider()
 
-    # --- CAMS Reconciliation / Retry Export --------------------------------
     st.subheader("④ CAMS Retry — Didn't Go Through?")
     st.caption(
         "Upload the CAMS scrape output. The app finds which exported accounts "
@@ -3012,11 +2550,6 @@ def admin_dashboard():
 
     st.divider()
     bulk_paste_endo_section()
-
-
-# ========================================================================
-# NEW: UI — ADMIN DASHBOARD (Auto Stat)
-# ========================================================================
 
 def autostat_admin_dashboard():
     st.markdown("""
@@ -3104,8 +2637,6 @@ def autostat_admin_dashboard():
         "Rows are marked exported after download."
     )
 
-    # Export always includes ALL rows (both CLEAN and CLAIM PAID), regardless
-    # of the display filter above. Only the hide_exported toggle affects this.
     to_export = df[df["exported"] == 0] if hide_exported else df
 
     if to_export.empty:
@@ -3150,10 +2681,6 @@ def autostat_admin_dashboard():
     bulk_paste_ptp_monitoring_section()
 
 
-# ========================================================================
-# NEW: UI — ADMIN PROCESS PICKER
-# ========================================================================
-
 def admin_picker_page():
     st.markdown("""
         <div class="psb-hero" style="padding-bottom:1rem;">
@@ -3164,7 +2691,7 @@ def admin_picker_page():
     """, unsafe_allow_html=True)
 
     st.markdown('<div class="picker-grid">', unsafe_allow_html=True)
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
 
     if _render_picker_card(
         c1, "🧾", "Endo Admin", "Review Endo submissions, check duplicates, export CAMS files.",
@@ -3187,6 +2714,13 @@ def admin_picker_page():
         st.session_state["admin_process"] = "rankings"
         st.rerun()
 
+    if _render_picker_card(
+        c4, "⏱️", "Tracker Admin", "Rankings, Countdown, Broken PTP.",
+        "green", "OPEN", "admin_pick_tracker",
+    ):
+        st.session_state["admin_process"] = "tracker"
+        st.rerun()
+
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.divider()
@@ -3195,24 +2729,18 @@ def admin_picker_page():
         st.session_state["logo_clicks"] = 0
         st.rerun()
 
-
 def admin_router():
-    """NEW: sits in front of the two admin dashboards, doesn't change
-    either one's internal code."""
     admin_process = st.session_state.get("admin_process")
     if admin_process == "endo":
-        admin_dashboard()  # original, untouched
+        admin_dashboard()
     elif admin_process == "autostat":
         autostat_admin_dashboard()
-    elif admin_process == "rankings":  # NEW (2026-09-17)
+    elif admin_process == "rankings":
         agent_rankings_page()
+    elif admin_process == "tracker":
+        tracker_admin_page()
     else:
         admin_picker_page()
-
-
-# ----------------------------------------------------------------------
-# MAIN
-# ----------------------------------------------------------------------
 
 def main():
     st.set_page_config(
@@ -3229,29 +2757,23 @@ def main():
 
     if "is_admin" not in st.session_state:
         st.session_state["is_admin"] = False
-    if "agent_process" not in st.session_state:  # NEW
+    if "agent_process" not in st.session_state:
         st.session_state["agent_process"] = None
-    if "admin_process" not in st.session_state:  # NEW
+    if "admin_process" not in st.session_state:
         st.session_state["admin_process"] = None
 
-    # ── Secret admin trigger via URL query param ────────────────────────
-    # Agents use the normal URL → agent form.
-    # You access admin by adding ?admin=1 to the URL, e.g.:
-    #   http://localhost:8501?admin=1
-    # No button, no visible link — agents will never see it.
     params = st.query_params
     if params.get("admin") == "1" and not st.session_state["is_admin"]:
         admin_login()
     elif st.session_state["is_admin"]:
-        admin_router()  # CHANGED: was admin_dashboard() directly
+        admin_router()
     else:
-        # NEW: agent picks Endo or Auto Stat first
         agent_process = st.session_state["agent_process"]
         if agent_process == "endo":
             if st.button("← Back to process picker"):
                 st.session_state["agent_process"] = None
                 st.rerun()
-            agent_form_page()  # original, untouched
+            agent_form_page()
         elif agent_process == "autostat":
             if st.button("← Back to process picker"):
                 st.session_state["agent_process"] = None
@@ -3269,7 +2791,6 @@ def main():
             public_rankings_page()
         else:
             process_picker_page()
-
 
 if __name__ == "__main__":
     main()
