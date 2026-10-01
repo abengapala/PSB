@@ -452,7 +452,13 @@ def insert_submission(account_number, endo_date, agent, placement):
 
 def load_submissions() -> pd.DataFrame:
     ws = _get_or_create_ws(SUBMISSIONS_SHEET, tuple(SUBMISSIONS_HEADERS))
-    records = ws.get_all_records()
+    try:
+        # keep every cell as text so ids / account numbers are never converted
+        # to numbers (leading zeros, "1e5"-style ids) -> mark_exported matches
+        records = ws.get_all_records(numericise_ignore=["all"])
+    except TypeError:
+        # very old gspread without numericise_ignore: previous behavior
+        records = ws.get_all_records()
     if not records:
         return pd.DataFrame(columns=SUBMISSIONS_HEADERS)
     df = pd.DataFrame(records)
@@ -2342,6 +2348,37 @@ def admin_login():
             st.rerun()
 
 
+def _on_endo_download(ids):
+    """Runs BEFORE the page reruns, so the table redraws without exported rows."""
+    try:
+        mark_exported(ids)
+        st.session_state["endo_export_msg"] = ("ok", f"Marked {len(ids)} row(s) as exported.")
+    except Exception as e:
+        st.session_state["endo_export_msg"] = (
+            "err",
+            f"Download worked, but marking rows as exported FAILED: {e}. "
+            "Rows were NOT marked - they will still show as new.",
+        )
+
+
+def _on_autostat_download(ids):
+    try:
+        mark_autostat_exported(ids)
+        st.session_state["autostat_export_msg"] = ("ok", f"Marked {len(ids)} row(s) as exported.")
+    except Exception as e:
+        st.session_state["autostat_export_msg"] = (
+            "err",
+            f"Download worked, but marking rows as exported FAILED: {e}. "
+            "Rows were NOT marked - they will still show as new.",
+        )
+
+
+def _show_flash(key):
+    flash = st.session_state.pop(key, None)
+    if flash:
+        (st.success if flash[0] == "ok" else st.error)(flash[1])
+
+
 def admin_dashboard():
     st.markdown("""
         <div class="psb-hero" style="padding-bottom:1rem;">
@@ -2467,22 +2504,23 @@ def admin_dashboard():
         "Rows are marked exported after download."
     )
 
+    _show_flash("endo_export_msg")
+
     to_export = filtered[filtered["status"] == "NEW — ready to scrape"]
 
     if to_export.empty:
         st.info("Nothing new to export with the current filters.")
     else:
-        st.write(f"DEBUG: to_export has {len(to_export)} rows, placements: {to_export['placement'].value_counts().to_dict()}")
         workbook_bytes = build_export_workbook(to_export)
-        clicked = st.download_button(
+        st.download_button(
             label=f"⬇ Download {len(to_export)} new account(s) as Excel",
             data=workbook_bytes,
             file_name=f"NEW_ENDO_export_{date.today().isoformat()}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_endo_export",
+            on_click=_on_endo_download,
+            args=(to_export["id"].tolist(),),
         )
-        if clicked:
-            mark_exported(to_export["id"].tolist())
-            st.success("Marked as exported. Refresh to see the updated list.")
 
     st.divider()
 
@@ -2637,6 +2675,8 @@ def autostat_admin_dashboard():
         "Rows are marked exported after download."
     )
 
+    _show_flash("autostat_export_msg")
+
     to_export = df[df["exported"] == 0] if hide_exported else df
 
     if to_export.empty:
@@ -2647,16 +2687,15 @@ def autostat_admin_dashboard():
 
         dl_col1, dl_col2 = st.columns(2)
         with dl_col1:
-            clicked = st.download_button(
+            st.download_button(
                 label=f"⬇ Full Export — Both Sheets ({len(to_export)} rows)",
                 data=workbook_bytes,
                 file_name=f"AUTOSTAT_export_{date.today().isoformat()}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="dl_full_export",
+                on_click=_on_autostat_download,
+                args=(to_export["id"].tolist(),),
             )
-            if clicked:
-                mark_autostat_exported(to_export["id"].tolist())
-                st.success("Marked as exported. Refresh to see the updated list.")
 
         with dl_col2:
             claim_only_bytes, claim_only_count = build_claim_paid_only_workbook(to_export)
