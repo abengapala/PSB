@@ -1,20 +1,27 @@
 """
 PSB NEW ENDO — Agent Submission + Admin DataGrid Duplicate Checker
 ====================================================================
-(original app — see full original docstring content further below in
-comments; behavior is UNCHANGED)
+(PASTE YOUR ORIGINAL DOCSTRING / CHANGELOG HERE — it was abbreviated in the chat)
 
-====================================================================
-CHANGELOG — READ THIS FIRST (next AI / next session, start here)
-====================================================================
-Date added: 2026-08-21
-Added by : Claude, per Urban's instructions.
-[... skipping the rest of the docstring for brevity, assuming the rest of the docstring is exactly as in the original]
+CHANGELOG — 2026-10-15
+  * AGENT LOGIN: agents pick their name from a dropdown + enter the shared
+    password (AGENT_PASSWORD). Login survives a browser refresh via a signed
+    token in the URL (?t=...), valid for SESSION_HOURS.
+  * AGENT field is now locked to the logged-in agent (Endo form, Auto Stat
+    form, My Submissions).
+  * PLACEMENT is a required dropdown (FRONTEND / MIDRANGE / HARDCORE) in the
+    agent Endo form.
+  * FIX: load_submissions now strips/uppercases placement so rows with stray
+    spaces / lowercase are no longer hidden by the admin Placement filter.
+    Admin dashboard now warns about rows with an invalid placement.
 ====================================================================
 """
 
+import hashlib
+import hmac
 import math
 import re
+import time
 import uuid
 from datetime import date, datetime, timedelta
 from io import BytesIO
@@ -33,7 +40,7 @@ PLACEMENTS = ["FRONTEND", "MIDRANGE", "HARDCORE"]
 AUTO_STAT_AGENTS = [
     "ABORONG",
     "CJBCRUZ",
-   "JEMOSENDE",
+    "JEMOSENDE",
     "CSAYSON",
     "EBASTASA",
     "GSANJOAQUIN",
@@ -317,6 +324,14 @@ STATUS_CODES = [
 
 ADMIN_PASSWORD = "changeme123"
 
+# ---- AGENT LOGIN CONFIG ----
+# One shared password for all agents. To change it, edit it here.
+# (Changing it automatically logs everyone out.)
+AGENT_PASSWORD = "SPM2026"
+SESSION_HOURS = 12                      # how long a login survives refreshes
+# Any long random string. Change it to invalidate every existing login.
+LOGIN_SIGNING_KEY = "psb-new-endo-change-this-long-random-string"
+
 CAMS_PLACEMENT = "CURING"
 CAMS_PRODUCT_TYPE = "AUTO"
 CAMS_LEVEL_CYCLE = "LEVEL 2"
@@ -441,7 +456,7 @@ def insert_submission(account_number, endo_date, agent, placement):
             normalize_account(account_number),
             endo_date.isoformat(),
             agent.strip().upper(),
-            placement.upper(),
+            placement.strip().upper(),
             datetime.now().isoformat(timespec="seconds"),
             0,
             "",
@@ -465,6 +480,9 @@ def load_submissions() -> pd.DataFrame:
     df["exported"] = pd.to_numeric(df["exported"], errors="coerce").fillna(0).astype(int)
     df["account_number"] = df["account_number"].astype(str)
     df["id"] = df["id"].astype(str)
+    # FIX: stray spaces / lowercase in placement were hiding rows from the
+    # admin Placement filter (and from the CAMS export).
+    df["placement"] = df["placement"].astype(str).str.strip().str.upper()
     return df.iloc[::-1].reset_index(drop=True)
 
 
@@ -1343,9 +1361,6 @@ def render_ptp_trend_section(df: pd.DataFrame):
         )
         day_labels = [d.strftime("%b %d") for d in daily.index]
 
-        t1, t2 = st.columns(2)
-        with t1:
-            chart_display_v0_series = None
         st.caption("PTP count logged per day (last 14 days)")
         st.bar_chart(
             pd.DataFrame({"PTP Count": daily["count"].values}, index=day_labels),
@@ -1968,6 +1983,82 @@ def inject_styles():
         unsafe_allow_html=True,
     )
 
+# ----------------------------------------------------------------------
+# AGENT LOGIN (shared password, survives browser refresh via signed URL token)
+# ----------------------------------------------------------------------
+
+def _sign_login(agent: str, exp: int) -> str:
+    # The password is part of the signed message, so changing AGENT_PASSWORD
+    # automatically invalidates every existing login.
+    msg = f"{agent}|{exp}|{AGENT_PASSWORD}".encode()
+    return hmac.new(LOGIN_SIGNING_KEY.encode(), msg, hashlib.sha256).hexdigest()
+
+
+def _make_login_token(agent: str) -> str:
+    exp = int(time.time()) + SESSION_HOURS * 3600
+    return f"{agent}|{exp}|{_sign_login(agent, exp)}"
+
+
+def _verify_login_token(token: str):
+    try:
+        agent, exp, sig = str(token).split("|")
+        exp = int(exp)
+    except ValueError:
+        return None
+    if agent not in AUTO_STAT_AGENTS or exp < time.time():
+        return None
+    if not hmac.compare_digest(sig, _sign_login(agent, exp)):
+        return None
+    return agent
+
+
+def restore_agent_login():
+    """If the page was refreshed, log the agent back in from the URL token."""
+    if st.session_state.get("agent_user"):
+        return
+    token = st.query_params.get("t")
+    if token:
+        agent = _verify_login_token(token)
+        if agent:
+            st.session_state["agent_user"] = agent
+
+
+def agent_logout():
+    st.session_state["agent_user"] = None
+    st.session_state["agent_process"] = None
+    if "t" in st.query_params:
+        del st.query_params["t"]
+
+
+def agent_login_page():
+    _, col, _ = st.columns([1, 2, 1])
+    with col:
+        st.markdown("""
+            <div class="psb-hero">
+                <div class="psb-badge">PSB</div>
+                <div class="psb-title">AGENT LOGIN</div>
+                <div class="psb-sub">Auto Loan Curing · Select your name</div>
+            </div>
+        """, unsafe_allow_html=True)
+
+        agent = st.selectbox(
+            "AGENT",
+            AUTO_STAT_AGENTS,
+            index=None,
+            placeholder="Choose your name...",
+            key="login_agent",
+        )
+        pwd = st.text_input("PASSWORD", type="password", key="login_pwd")
+
+        if st.button("Log in", use_container_width=True, key="login_btn"):
+            if agent and hmac.compare_digest(str(pwd), AGENT_PASSWORD):
+                st.session_state["agent_user"] = agent
+                st.query_params["t"] = _make_login_token(agent)
+                st.rerun()
+            else:
+                st.error("Wrong agent or password.")
+
+
 def agent_form_page():
     _, col, _ = st.columns([1, 2, 1])
     with col:
@@ -1979,14 +2070,18 @@ def agent_form_page():
             </div>
         """, unsafe_allow_html=True)
 
+        agent = st.session_state.get("agent_user") or ""
+
         with st.form("endo_form", clear_on_submit=True):
             account_number = st.text_input(
                 "ACCOUNT NUMBER",
                 placeholder="e.g. 001-388-06387719-6 or digits only",
             )
             endo_date = st.date_input("ENDO DATE", value=date.today())
-            agent = st.text_input("AGENT", placeholder="CMS username e.g. CSAYSON")
-            placement = st.selectbox("PLACEMENT", PLACEMENTS)
+            st.text_input("AGENT", value=agent, disabled=True)
+            placement = st.selectbox(
+                "PLACEMENT", PLACEMENTS, index=None, placeholder="Choose placement..."
+            )
 
             submitted = st.form_submit_button("✦ SUBMIT ENDO")
 
@@ -1996,7 +2091,9 @@ def agent_form_page():
                 if not clean_account or len(clean_account) < 10:
                     errors.append("Account Number looks invalid — enter at least 10 digits.")
                 if not agent.strip():
-                    errors.append("Agent is required.")
+                    errors.append("Agent is required — please log in again.")
+                if not placement:
+                    errors.append("Placement is required.")
 
                 if errors:
                     for e in errors:
@@ -2021,12 +2118,9 @@ def autostat_form_page():
             </div>
         """, unsafe_allow_html=True)
 
-        collector_raw = st.text_input(
-            "AGENT (CMS username — paste it)",
-            placeholder="e.g. CSAYSON",
-            key=f"as_col_{v}",
-        )
+        collector_raw = st.session_state.get("agent_user") or ""
         collector = collector_raw.strip().upper()
+        st.text_input("AGENT", value=collector, disabled=True, key=f"as_col_{v}")
 
         account_number = st.text_input(
             "ACCOUNT NUMBER",
@@ -2096,11 +2190,11 @@ def autostat_form_page():
             if not status_code:
                 errors.append("Status Code is required.")
             if not collector:
-                errors.append("Agent is required — paste your CMS username.")
+                errors.append("Agent is required — please log in again.")
             elif collector not in [a.upper() for a in AUTO_STAT_AGENTS]:
                 errors.append(
                     f"'{collector_raw.strip()}' isn't a recognized agent. "
-                    f"Check the spelling, or ask admin to add you to the roster."
+                    f"Ask admin to add you to the roster."
                 )
             if has_ptp and not ptp_date:
                 errors.append("PTP Date is required for this status.")
@@ -2143,18 +2237,13 @@ def my_submissions_page():
             </div>
         """, unsafe_allow_html=True)
 
-        who_raw = st.text_input(
-            "WHO ARE YOU",
-            placeholder="Paste your CMS username to see what you've submitted...",
-            key="my_sub_who",
-        )
-        who = who_raw.strip() if who_raw else None
-
+        who = st.session_state.get("agent_user")
         if not who:
-            st.info("Paste your name above to see your submitted Endo and Auto Stat entries.")
+            st.info("Please log in to see your submissions.")
             return
 
         who_upper = who.strip().upper()
+        st.caption(f"Showing submissions for **{who_upper}**")
 
         endo_df = load_submissions()
         my_endo = endo_df[endo_df["agent"].astype(str).str.strip().str.upper() == who_upper]
@@ -2451,6 +2540,17 @@ def admin_dashboard():
     if df.empty:
         st.info("No submissions yet.")
         return
+
+    # Warn about rows whose placement is not one of the 3 valid values.
+    # They would be hidden by the Placement filter and skipped by the CAMS export.
+    bad_placement = df[~df["placement"].isin(PLACEMENTS)]
+    if not bad_placement.empty:
+        st.warning(
+            f"{len(bad_placement)} row(s) have an invalid placement and are hidden / "
+            f"not exportable. Values found: "
+            f"{sorted(bad_placement['placement'].unique().tolist())}. "
+            f"Fix them in the Submissions sheet."
+        )
 
     df["status"] = df["account_number"].apply(
         lambda a: "DUPLICATE — already in system" if dedupe_key(a) in datagrid_set else "NEW — ready to scrape"
@@ -2800,6 +2900,8 @@ def main():
         st.session_state["agent_process"] = None
     if "admin_process" not in st.session_state:
         st.session_state["admin_process"] = None
+    if "agent_user" not in st.session_state:
+        st.session_state["agent_user"] = None
 
     params = st.query_params
     if params.get("admin") == "1" and not st.session_state["is_admin"]:
@@ -2807,6 +2909,20 @@ def main():
     elif st.session_state["is_admin"]:
         admin_router()
     else:
+        # ---- AGENT SIDE: must be logged in ----
+        restore_agent_login()
+        if not st.session_state["agent_user"]:
+            agent_login_page()
+            return
+
+        bar_a, bar_b = st.columns([5, 1])
+        with bar_a:
+            st.caption(f"Logged in as **{st.session_state['agent_user']}**")
+        with bar_b:
+            if st.button("Log out", key="agent_logout_btn"):
+                agent_logout()
+                st.rerun()
+
         agent_process = st.session_state["agent_process"]
         if agent_process == "endo":
             if st.button("← Back to process picker"):
