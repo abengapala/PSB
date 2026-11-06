@@ -1,19 +1,11 @@
 """
 PSB NEW ENDO — Agent Submission + Admin DataGrid Duplicate Checker
 ====================================================================
-(PASTE YOUR ORIGINAL DOCSTRING / CHANGELOG HERE — it was abbreviated in the chat)
-
-CHANGELOG — 2026-10-15
-  * AGENT LOGIN: agents pick their name from a dropdown + enter the shared
-    password (AGENT_PASSWORD). Login survives a browser refresh via a signed
-    token in the URL (?t=...), valid for SESSION_HOURS.
-  * AGENT field is now locked to the logged-in agent (Endo form, Auto Stat
-    form, My Submissions).
-  * PLACEMENT is a required dropdown (FRONTEND / MIDRANGE / HARDCORE) in the
-    agent Endo form.
-  * FIX: load_submissions now strips/uppercases placement so rows with stray
-    spaces / lowercase are no longer hidden by the admin Placement filter.
-    Admin dashboard now warns about rows with an invalid placement.
+CHANGELOG — 2026-11-06
+  * Removed HARDCORE from active PLACEMENTS choices (Endo form, Bulk Paste,
+    and CAMS Export now only use FRONTEND and MIDRANGE).
+  * Historical HARDCORE rows in Google Sheets are preserved and remain
+    viewable in My Submissions and Admin Dashboard.
 ====================================================================
 """
 
@@ -35,7 +27,8 @@ from google.oauth2.service_account import Credentials
 # ----------------------------------------------------------------------
 # CONFIG — change these to fit your team
 # ----------------------------------------------------------------------
-PLACEMENTS = ["FRONTEND", "MIDRANGE", "HARDCORE"]
+PLACEMENTS = ["FRONTEND", "MIDRANGE"]
+ALL_KNOWN_PLACEMENTS = ["FRONTEND", "MIDRANGE", "HARDCORE"]
 
 AUTO_STAT_AGENTS = [
     "ABORONG",
@@ -1988,8 +1981,6 @@ def inject_styles():
 # ----------------------------------------------------------------------
 
 def _sign_login(agent: str, exp: int) -> str:
-    # The password is part of the signed message, so changing AGENT_PASSWORD
-    # automatically invalidates every existing login.
     msg = f"{agent}|{exp}|{AGENT_PASSWORD}".encode()
     return hmac.new(LOGIN_SIGNING_KEY.encode(), msg, hashlib.sha256).hexdigest()
 
@@ -2541,9 +2532,9 @@ def admin_dashboard():
         st.info("No submissions yet.")
         return
 
-    # Warn about rows whose placement is not one of the 3 valid values.
-    # They would be hidden by the Placement filter and skipped by the CAMS export.
-    bad_placement = df[~df["placement"].isin(PLACEMENTS)]
+    # Warn about rows whose placement is not one of the known values
+    # (historical HARDCORE rows are preserved and not flagged as invalid).
+    bad_placement = df[~df["placement"].isin(ALL_KNOWN_PLACEMENTS)]
     if not bad_placement.empty:
         st.warning(
             f"{len(bad_placement)} row(s) have an invalid placement and are hidden / "
@@ -2558,7 +2549,7 @@ def admin_dashboard():
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        placement_filter = st.multiselect("Placement", PLACEMENTS, default=PLACEMENTS)
+        placement_filter = st.multiselect("Placement", ALL_KNOWN_PLACEMENTS, default=PLACEMENTS)
     with col2:
         status_filter = st.multiselect(
             "Status",
@@ -2600,13 +2591,15 @@ def admin_dashboard():
 
     st.subheader("③ Download for CAMS SCRAPE")
     st.caption(
-        "Downloads only NEW, not-yet-exported rows formatted per placement. "
+        "Downloads only NEW, not-yet-exported rows (FRONTEND & MIDRANGE). "
         "Rows are marked exported after download."
     )
 
     _show_flash("endo_export_msg")
 
-    to_export = filtered[filtered["status"] == "NEW — ready to scrape"]
+    to_export = filtered[
+        (filtered["status"] == "NEW — ready to scrape") & (filtered["placement"].isin(PLACEMENTS))
+    ]
 
     if to_export.empty:
         st.info("Nothing new to export with the current filters.")
@@ -2653,7 +2646,9 @@ def admin_dashboard():
                 }
 
                 all_submissions = load_submissions()
-                exported_submissions = all_submissions[all_submissions["exported"] == 1].copy()
+                exported_submissions = all_submissions[
+                    (all_submissions["exported"] == 1) & (all_submissions["placement"].isin(PLACEMENTS))
+                ].copy()
 
                 if exported_submissions.empty:
                     st.info("No exported submissions found to compare against.")
